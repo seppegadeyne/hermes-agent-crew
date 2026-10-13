@@ -1,0 +1,13 @@
+line-length = 120
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["SIM105", "SIM108"]
+
+[lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[lint.isort]
+known-first-party = ["hermes_claude_agents"]
+known-third-party = ["conftest"]

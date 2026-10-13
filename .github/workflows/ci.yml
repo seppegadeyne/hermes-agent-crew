@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # Weekly run against Hermes main catches upstream drift between pushes.
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HERMES_REPO: NousResearch/hermes-agent
+  # Oldest Hermes release the plugin supports (plugin.yaml requires_hermes). Move it deliberately.
+  HERMES_OLDEST_SHA: 818c13be1dc4fd28987e1e881a9408224afd4535  # v0.21.6
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uvx ruff@0.15.10 check .
+
+  hermes:
+    name: Against Hermes (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [oldest, main]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - name: Resolve the Hermes ref
+        id: ref
+        run: |
+          if [ "${{ matrix.target }}" = oldest ]; then
+            echo "ref=$HERMES_OLDEST_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HERMES_REPO }}
+          ref: ${{ steps.ref.outputs.ref }}
+          path: hermes
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Hermes from its own lockfile
+        working-directory: hermes
+        run: |
+          uv sync --frozen --no-dev
+          uv pip install --python .venv/bin/python pytest
+      - name: hermes plugins doctor
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home-doctor
+        run: hermes/.venv/bin/hermes plugins doctor plugin --ci
+      - name: hermes plugins validate (catalog admission checks)
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home-validate
+        run: hermes/.venv/bin/hermes plugins validate plugin
+      - name: Tests (unit and real-loader integration)
+        env:
+          HERMES_SOURCE: ${{ github.workspace }}/hermes
+        working-directory: plugin
+        run: ../hermes/.venv/bin/python -m pytest -q -rs
