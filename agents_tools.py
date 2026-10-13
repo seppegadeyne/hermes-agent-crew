@@ -19,6 +19,9 @@ _TASK = {
         "context": {"type": "string",
                     "description": "Facts the agent needs: paths, constraints, decisions, what you already know or "
                                    "ruled out. The agent sees only goal + context."},
+        "workdir": {"type": "string",
+                    "description": "Absolute path of the folder the work is in (a repository root, usually). "
+                                   "Defaults to this session's working directory; attach_diff reads git there."},
         "attach_diff": {"type": "boolean",
                         "description": "Attach the working tree's git status, stat and diff to the agent's context "
                                        "(for reviews; keeps the diff out of your own context)."},

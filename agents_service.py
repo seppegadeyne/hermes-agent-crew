@@ -20,6 +20,7 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import agents_git
@@ -279,9 +280,9 @@ class AgentsService:
             except ValueError:
                 raise Refusal("invalid_arguments", "tasks must be a list of task objects.") from None
         if raw is None and args.get("agent"):
-            raw = [{key: args.get(key) for key in ("agent", "goal", "context", "attach_diff", "diff_base")}]
+            raw = [{key: args.get(key) for key in ("agent", "goal", "context", "attach_diff", "diff_base", "workdir")}]
         if not isinstance(raw, list) or not raw:
-            raise Refusal("invalid_arguments", "Pass tasks: [{agent, goal, context?, attach_diff?}].")
+            raise Refusal("invalid_arguments", "Pass tasks: [{agent, goal, context?, workdir?, attach_diff?}].")
         if len(raw) > settings["max_parallel"]:
             raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call.")
         names = ", ".join(sorted(roster.agents)) or "none (see /claude-agents)"
@@ -312,8 +313,20 @@ class AgentsService:
                 "context": (context or "").strip(),
                 "attach_diff": attach is True or (isinstance(attach, str) and attach.strip().lower() == "true"),
                 "diff_base": base.strip() if isinstance(base, str) and base.strip() else None,
+                "workdir": self._workdir(item.get("workdir"), where),
             }))
         return tasks
+
+    @staticmethod
+    def _workdir(raw: Any, where: str) -> Path | None:
+        """The folder an agent works in: an existing absolute path, or None for the session's own."""
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        if isinstance(raw, str):
+            path = Path(raw.strip()).expanduser()
+            if path.is_absolute() and path.is_dir():
+                return path
+        raise Refusal("invalid_workdir", f"{where}: workdir {raw!r} is not an existing absolute folder path.")
 
     def _launch(self, spec: AgentSpec, task: dict, parent: Any, parent_provider: str, session_id: str,
                 settings: dict, features: dict) -> Run:
@@ -386,6 +399,9 @@ class AgentsService:
         rules = ["## Rules for this run",
                  "- You work for a lead agent and cannot see its conversation: the goal and this context are all "
                  "you get. Do not ask questions; state your assumptions in the report."]
+        if task.get("workdir"):
+            rules.append(f"- Work in {task['workdir']}: resolve relative paths against it and pass absolute paths "
+                         "to tools. It replaces any other workspace path you were given.")
         if spec.readonly:
             rules.append("- You are read-only. Tools that change files, run commands or start other agents are "
                          "blocked: investigate and report instead.")
@@ -400,7 +416,8 @@ class AgentsService:
         if task["attach_diff"]:
             reserve = min(len(caller), 8_000) + 64 if caller else 0
             budget = min(settings["diff_max_chars"], remaining - reserve - 80)
-            body = (agents_git.collect(self.host.cwd(), task["diff_base"], budget) if budget >= MIN_DIFF_CHARS
+            where = task.get("workdir") or self.host.cwd()
+            body = (agents_git.collect(where, task["diff_base"], budget) if budget >= MIN_DIFF_CHARS
                     else "(no room left for a diff; read the changed files with read_file)")
             diff = "## Working tree snapshot (read-only, taken when the agent started)\n" + body
             remaining -= len(diff) + 2
@@ -658,8 +675,10 @@ def render_prompt(roster: Roster, limit: int = 3_800) -> str:
     if len(agents) > 12:
         lines.append(f"- … {len(agents) - 12} more (/claude-agents lists them)")
     lines += [
-        'Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "..."}]}. If it is a '
-        'deferred tool, call it through tool_call with name "agents_run". Several tasks in one call run in parallel.',
+        'Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", "workdir": '
+        '"/abs/path/to/repo"}]}. If it is a deferred tool, call it through tool_call with name "agents_run". '
+        "Several tasks in one call run in parallel. Set workdir to the folder the work is in; it defaults to this "
+        "session's working directory.",
         "When to use it:",
         "- Swarm: send read-only scouts for file discovery, grep sweeps and docs lookups instead of reading many "
         "files yourself.",

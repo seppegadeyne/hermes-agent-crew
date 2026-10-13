@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 (2026-10-13)
+
+- Tasks take an optional `workdir`: the absolute path of the folder the agent works in, and the
+  folder `attach_diff` reads git from. Without it agents use the session's working directory.
+  The first live run showed why: a session whose working directory pointed elsewhere sent both
+  agents (and the diff snapshot) to the wrong folder.
+
 ## 0.1.0 (2026-10-13)
 
 First release.

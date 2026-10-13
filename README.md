@@ -57,16 +57,20 @@ Requirements:
 {
   "tasks": [
     {"agent": "explorer", "goal": "Find where sessions are persisted and who calls it.",
-     "context": "Python repo; storage code lives under src/store/."},
-    {"agent": "reviewer", "goal": "Done check of the session-storage change.", "attach_diff": true}
+     "context": "Python repo; storage code lives under src/store/.", "workdir": "/srv/app"},
+    {"agent": "reviewer", "goal": "Done check of the session-storage change.", "workdir": "/srv/app",
+     "attach_diff": true}
   ],
   "wait_seconds": 300
 }
 ```
 
 - `goal` is the complete task; `context` carries the facts. Agents cannot see the conversation.
-- `attach_diff` adds `git status`, `--stat` and the diff of the working tree (against `diff_base`,
-  default `HEAD`) to the agent's context.
+- `workdir` is the absolute path of the folder the agent works in, usually a repository root. It
+  defaults to the session's working directory. Pass it whenever the work is somewhere else: a
+  subagent has no other reliable notion of "the current directory".
+- `attach_diff` adds `git status`, `--stat` and the diff of the working tree in `workdir` (against
+  `diff_base`, default `HEAD`) to the agent's context.
 - The wait is capped 25 seconds below Hermes' tool deadline (`timeouts.tools.sequential_call`,
   default 420 seconds). Agents that are still working come back as `run_ids`.
 

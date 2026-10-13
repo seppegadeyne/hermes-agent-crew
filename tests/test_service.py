@@ -285,6 +285,34 @@ def test_attach_diff_puts_the_snapshot_in_the_child_context(rig, monkeypatch):
     assert "+new line" in rig.lifecycle.requests[0].context
 
 
+def test_workdir_scopes_the_agent_and_the_diff(rig, monkeypatch, tmp_path):
+    from hermes_claude_agents import agents_git
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    seen = {}
+    monkeypatch.setattr(agents_git, "collect", lambda cwd, base, budget: seen.setdefault("cwd", cwd) and "+x")
+    run(rig, [{"agent": "reviewer", "goal": "done check", "attach_diff": True, "workdir": str(repo)}],
+        wait_seconds=0)
+    assert seen["cwd"] == repo
+    assert f"- Work in {repo}:" in rig.lifecycle.requests[0].context
+
+
+def test_without_workdir_the_session_folder_is_used(rig, monkeypatch):
+    from hermes_claude_agents import agents_git
+    seen = {}
+    monkeypatch.setattr(agents_git, "collect", lambda cwd, base, budget: seen.setdefault("cwd", cwd) and "+x")
+    run(rig, [{"agent": "reviewer", "goal": "done check", "attach_diff": True}], wait_seconds=0)
+    assert seen["cwd"] == rig.host.repo
+    assert "- Work in" not in rig.lifecycle.requests[0].context
+
+
+def test_invalid_workdir_is_refused(rig, tmp_path):
+    for bad in ("relative/path", str(tmp_path / "missing"), 42):
+        out = run(rig, [{"agent": "explorer", "goal": "x", "workdir": bad}])
+        assert out["error"] == "invalid_workdir", bad
+    assert rig.lifecycle.requests == []
+
+
 def test_context_stays_under_the_lifecycle_cap(rig):
     run(rig, [{"agent": "reviewer", "goal": "x", "context": "y" * 100_000}], wait_seconds=0)
     assert len(rig.lifecycle.requests[0].context) <= 31_500
