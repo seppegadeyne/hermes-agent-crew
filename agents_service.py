@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import re
 import threading
 import time
 import uuid
@@ -40,6 +41,14 @@ BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", "tool_call"})
 STALE_UNKNOWN_SECONDS = 7_200
 TERMINAL = {"SUCCEEDED": "succeeded", "FAILED": "failed", "INTERRUPTED": "interrupted", "CANCELLED": "cancelled"}
 STOP_STATUS = {"completed": "succeeded", "interrupted": "interrupted", "cancelled": "cancelled"}
+# Lead tool calls that only look around. A run of them in one turn is the work a scout does cheaper.
+SCOUT_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract"})
+_READ_COMMAND = re.compile(
+    r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)*(?:grep|rg|cat|sed\s+-n|head|tail|find|ls|wc|tree|"
+    r"git\s+(?:log|show|diff|status|grep|blame))\b")
+_HARMLESS_REDIRECT = re.compile(r"\d?>\s*/dev/null|\d>&\d")
+_WRITE_HINT = re.compile(r">|\bxargs\b|-delete\b|-exec\b|\bsed\b[^|;&]*\s-i|\b(?:rm|mv|cp|tee|chmod)\b")
+MAX_NUDGE_SESSIONS = 512
 ISOLATION_MESSAGE = ("hermes-claude-agents needs plugins.isolation: in_process. Inside the plugin host process "
                      "Hermes cannot bind a launch to the running agent turn.")
 
@@ -122,6 +131,7 @@ class AgentsService:
         self._runs: OrderedDict[str, Run] = OrderedDict()
         self._by_child_session: dict[str, str] = {}
         self._intent: contextvars.ContextVar = contextvars.ContextVar("hermes_claude_agents_intent", default=None)
+        self._nudges: OrderedDict[str, dict] = OrderedDict()  # lead session id -> this turn's scouting count
 
     # ------------------------------------------------------------------ configuration
 
@@ -173,6 +183,59 @@ class AgentsService:
         except Exception:
             message = f"hermes-claude-agents: the tool policy check for agent '{policy.agent}' failed; blocked."
         return {"action": "block", "message": message} if message else None
+
+    def on_transform_tool_result(self, tool_name: Any = "", args: Any = None, result: Any = None, task_id: Any = "",
+                                 session_id: Any = "", turn_id: Any = "", **_: Any) -> str | None:
+        """Nudge a lead that keeps scouting by hand to hand the rest to read-only agents.
+
+        Counts the lead's own read and search calls per turn; at ``nudge_after`` it appends one short
+        hint to that tool result, at most once per turn and never after the turn used agents. Fail-open
+        and cheap: anything unexpected returns None and leaves the result as it is.
+        """
+        try:
+            return self._nudge(str(tool_name or ""), args, result, str(task_id or ""), str(session_id or ""),
+                               str(turn_id or ""))
+        except Exception:
+            return None
+
+    def _nudge(self, tool_name: str, args: Any, result: Any, task_id: str, session_id: str,
+               turn_id: str) -> str | None:
+        # Only model-facing calls of a live turn carry both ids. Calls from execute_code scripts and other
+        # nested paths come without them, and their consumers parse the result as JSON: never touch those.
+        if not session_id or not turn_id or not isinstance(result, str) or self.policies.get(task_id) is not None:
+            return None
+        delegating = tool_name in ("agents_run", "agents_status")
+        if not delegating and not _is_scouting(tool_name, args):
+            return None
+        if self.host.in_child_context() or _depth(self.host.parent()) > 0:
+            return None  # children never get the hint, whoever launched them
+        with self._lock:
+            state = self._nudges.get(session_id)
+            if state is None or state["turn"] != turn_id:
+                state = {"turn": turn_id, "count": 0, "done": False}
+                self._nudges[session_id] = state
+            self._nudges.move_to_end(session_id)
+            while len(self._nudges) > MAX_NUDGE_SESSIONS:
+                self._nudges.popitem(last=False)
+            if delegating:
+                state["done"] = True
+                return None
+            if state["done"]:
+                return None
+            state["count"] += 1
+            count = state["count"]
+        settings, _, roster = self.config()
+        threshold = settings["nudge_after"]
+        if not threshold or count < threshold or result.lstrip().startswith('{"error"'):
+            return None
+        scouts = sorted(spec.name for spec in roster.agents.values() if spec.readonly)
+        if not scouts:
+            return None
+        with self._lock:
+            if state["done"]:  # a parallel call of the same turn got there first
+                return None
+            state["done"] = True
+        return result + "\n\n" + nudge_text(count, scouts)
 
     # ------------------------------------------------------------------ tools
 
@@ -284,7 +347,8 @@ class AgentsService:
         if not isinstance(raw, list) or not raw:
             raise Refusal("invalid_arguments", "Pass tasks: [{agent, goal, context?, workdir?, attach_diff?}].")
         if len(raw) > settings["max_parallel"]:
-            raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call.")
+            raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call; nothing was started. "
+                                            "Send the rest in a second agents_run call, or merge related tasks.")
         names = ", ".join(sorted(roster.agents)) or "none (see /claude-agents)"
         tasks = []
         for index, item in enumerate(raw):
@@ -660,6 +724,23 @@ class AgentsService:
         return render_prompt(roster)
 
 
+def _is_scouting(tool_name: str, args: Any) -> bool:
+    if tool_name in SCOUT_TOOLS:
+        return True
+    if tool_name == "terminal" and isinstance(args, dict):
+        command = str(args.get("command") or "")
+        quiet = _HARMLESS_REDIRECT.sub(" ", command)  # 2>/dev/null and 2>&1 do not write anything
+        return bool(_READ_COMMAND.match(quiet)) and not _WRITE_HINT.search(quiet)
+    return False
+
+
+def nudge_text(count: int, scouts: list) -> str:
+    names = ", ".join(scouts[:4])
+    return (f"[hermes-claude-agents] {count} read/search calls by hand in this turn. If more lookups follow, "
+            f"send them to read-only agents ({names}) in ONE agents_run call, one task per question or area, "
+            "and keep your own context for decisions. Keep going yourself if you are nearly done.")
+
+
 def agent_label(spec: AgentSpec) -> str:
     flags = [spec.model or "lead's model"] + (["read-only"] if spec.readonly else [])
     return f"{spec.name} ({', '.join(flags)})"
@@ -696,8 +777,11 @@ _PROMPT_TAIL = [
     "Several tasks in one call run in parallel. Set workdir to the folder the work is in; it defaults to this "
     "session's working directory.",
     "When to use it:",
-    "- Swarm: send read-only scouts for file discovery, grep sweeps and docs lookups instead of reading many "
-    "files yourself.",
+    "- Swarm early: when a task needs more than a handful of reads or searches (unfamiliar code, several "
+    "areas, docs), send read-only scouts in ONE agents_run call, one task per question or area, before you "
+    "read it all yourself.",
+    "- Background work: a builder or a long review can run with wait_seconds 0 while you do your own part; "
+    "collect it later with agents_status.",
     "- Senior review on call: ask the reviewer (1) before you lock a multi-file plan, (2) when the same test or "
     "build error fails twice, (3) before you call non-trivial work done; pass attach_diff: true so it reads "
     "the diff itself.",

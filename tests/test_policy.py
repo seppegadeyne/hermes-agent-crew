@@ -13,9 +13,23 @@ def test_read_only_policy_allows_reads_and_blocks_everything_else():
     for tool in ("read_file", "search_files", "web_search", "web_extract", "skill_view", "tool_search"):
         assert policy.decide(tool) is None, tool
     for tool in ("write_file", "patch", "terminal", "process_manage", "execute_code", "browser_click", "memory",
-                 "cronjob_manage", "skill_manage", "tool_call", "mcp__storyblok__update_story"):
+                 "cronjob_manage", "skill_manage", "mcp__storyblok__update_story"):
         message = policy.decide(tool)
         assert message and "read-only" in message and tool in message, tool
+    # Hermes unwraps a valid tool_call to the real tool before the guard runs; only a broken one lands here.
+    message = policy.decide("tool_call")
+    assert message and "did not resolve" in message and "tool_describe" in message
+
+
+def test_tool_list_agent_can_reach_its_deferred_mcp_tools():
+    # With tool search on, MCP tools are deferred: an agent limited to them needs the catalog reads.
+    policy = policy_for("---\nname: l\nreadonly: true\ntools: [mcp__language__check_dutch_text]\n---\n")
+    assert policy.decide("tool_search") is None and policy.decide("tool_describe") is None
+    assert policy.decide("mcp__language__check_dutch_text") is None
+    assert policy.decide("read_file") and policy.decide("mcp__language__other")
+    writer = policy_for("---\nname: w\nmodel: sonnet\ntools: [write_file]\n---\n")
+    assert writer.decide("tool_describe") is None and writer.decide("terminal")
+    assert "cannot start other agents" in writer.decide("agents_run")
 
 
 def test_agents_never_start_agents():

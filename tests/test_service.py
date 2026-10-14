@@ -383,3 +383,78 @@ def test_roster_text_lists_agents_and_problems(rig):
     text = rig.service.roster_text()
     assert "reviewer (opus, claude-subscription-directsdk-experimental, read-only)" in text
     assert "problem:" in text and "bad.md" in text
+
+
+def lead_result(rig, tool, args=None, turn="t1", session="lead-1", result='{"content": "x"}'):
+    return rig.service.on_transform_tool_result(tool_name=tool, args=args or {}, result=result, task_id=session,
+                                                session_id=session, turn_id=turn)
+
+
+def test_nudge_fires_once_after_a_run_of_manual_scouting(rig):
+    for _ in range(7):
+        assert lead_result(rig, "read_file") is None
+    assert lead_result(rig, "write_file") is None  # edits do not count
+    hinted = lead_result(rig, "terminal", {"command": "cd /repo && grep -n foo src/*.py"})
+    assert hinted.startswith('{"content": "x"}\n\n[hermes-claude-agents] 8 read/search calls')
+    assert "explorer" in hinted and "agents_run" in hinted and "builder" not in hinted
+    assert lead_result(rig, "read_file") is None  # once per turn
+    for _ in range(7):
+        assert lead_result(rig, "search_files", turn="t2") is None
+    assert lead_result(rig, "web_search", turn="t2") is not None  # a new turn counts afresh
+
+
+def test_no_nudge_once_the_turn_delegates_or_for_other_commands(rig):
+    lead_result(rig, "agents_run")
+    for _ in range(12):
+        assert lead_result(rig, "read_file") is None
+    for _ in range(12):
+        assert lead_result(rig, "terminal", {"command": "python -m pytest -q"}, turn="t2") is None
+
+
+def test_no_nudge_for_children_or_when_switched_off(rig):
+    run(rig, [{"agent": "explorer", "goal": "map it"}], wait_seconds=0)
+    for _ in range(12):
+        assert lead_result(rig, "read_file", session="sa-0-00000000") is None  # our own child
+    rig.host.parent_agent._delegate_depth = 1
+    for _ in range(12):
+        assert lead_result(rig, "read_file", session="other-child") is None
+    rig.host.parent_agent._delegate_depth = 0
+    rig.host.settings = {"nudge_after": 0}
+    for _ in range(12):
+        assert lead_result(rig, "read_file", session="lead-2") is None
+
+
+def test_nudge_never_raises_and_ignores_odd_input(rig):
+    assert rig.service.on_transform_tool_result() is None
+    assert lead_result(rig, "read_file", result=None) is None
+    rig.host.parent = None  # a broken host must not break the tool result
+    assert lead_result(rig, "read_file") is None
+
+
+def test_schema_allows_what_the_settings_allow(plugin):
+    from hermes_claude_agents.agents_config import INT_RANGES
+    from hermes_claude_agents.agents_tools import schema
+    assert schema("agents_run")["parameters"]["properties"]["tasks"]["maxItems"] == INT_RANGES["max_parallel"][1]
+
+
+def test_nudge_leaves_script_and_error_results_alone(rig):
+    # execute_code scripts call tools without a session or turn id and parse every result as JSON.
+    for _ in range(12):
+        assert rig.service.on_transform_tool_result(tool_name="read_file", args={}, result='{"content": "x"}',
+                                                    task_id="lead-1", session_id="", turn_id="") is None
+        assert rig.service.on_transform_tool_result(tool_name="read_file", args={}, result='{"content": "x"}',
+                                                    task_id="lead-1", session_id="lead-1", turn_id="") is None
+    for _ in range(7):
+        lead_result(rig, "read_file")
+    assert lead_result(rig, "read_file", result='{"error": "no such file"}') is None
+    assert lead_result(rig, "read_file") is not None  # the hint waits for a usable result
+
+
+def test_scouting_commands():
+    from hermes_claude_agents.agents_service import _is_scouting
+    for command in ("grep -rn foo src 2>/dev/null", "cd /r && git log --oneline -5 2>&1", "sed -n 1,40p a.py",
+                    "find . -name '*.py' | head", "ls -la; wc -l *.py"):
+        assert _is_scouting("terminal", {"command": command}), command
+    for command in ("cat > notes.txt", "find . -name x -delete", "sed -n 1p -i a.py", "grep -l x | xargs rm",
+                    "ls; rm x", "python -m pytest -q", "git commit -m x", "echo hi"):
+        assert not _is_scouting("terminal", {"command": command}), command

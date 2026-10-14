@@ -8,6 +8,7 @@ from typing import Any
 TOOLSET = "claude_agents"
 TOOL_NAMES = ("agents_run", "agents_status")
 _WAIT_MAX = 1800
+_TASKS_MAX = 16  # the cap of the max_parallel setting; the schema must never refuse what settings allow
 
 _TASK = {
     "type": "object",
@@ -37,8 +38,9 @@ def schema(name: str, description: str = "") -> dict:
         return {"name": name, "description": description, "parameters": {
             "type": "object",
             "properties": {
-                "tasks": {"type": "array", "minItems": 1, "maxItems": 8, "items": _TASK,
-                          "description": "One entry per agent run; entries run in parallel."},
+                "tasks": {"type": "array", "minItems": 1, "maxItems": _TASKS_MAX, "items": _TASK,
+                          "description": "One entry per agent run; entries run in parallel (the operator's "
+                                         "max_parallel setting may allow fewer per call)."},
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": _WAIT_MAX,
                                  "description": "How long to wait for results before returning run_ids "
                                                 "(default from settings, capped below Hermes' tool deadline)."},

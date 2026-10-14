@@ -29,6 +29,7 @@ def register(ctx):
     ctx.register_hook("pre_tool_call", service.pre_tool_call)
     ctx.register_hook("subagent_start", service.on_subagent_start)
     ctx.register_hook("subagent_stop", service.on_subagent_stop)
+    ctx.register_hook("transform_tool_result", service.on_transform_tool_result)
     if hasattr(ctx, "register_system_prompt_section"):
         ctx.register_system_prompt_section(PROMPT_SECTION_ID, service.prompt_section, max_chars=4000)
 

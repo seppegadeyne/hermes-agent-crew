@@ -1,5 +1,5 @@
 name: hermes-claude-agents
-version: 0.3.0
+version: 0.4.0
 description: "Named Claude subagents for Hermes: Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format) with a fixed model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone
@@ -60,10 +60,15 @@ config_schema:
     default: 12000
     label: Report budget (characters)
     description: Longest agent report returned to the lead per run (1000-32000).
+  nudge_after:
+    type: int
+    default: 8
+    label: Scouting nudge
+    description: After this many read or search calls by the lead in one turn without agents, add a one-time hint to use read-only agents (0 turns it off, max 50).
   prompt_section:
     type: bool
     default: true
     label: Prompt guidance
     description: Add a short roster and usage guide to the lead's system prompt.
 provides_tools: [agents_run, agents_status]
-provides_hooks: [pre_tool_call, subagent_start, subagent_stop]
+provides_hooks: [pre_tool_call, subagent_start, subagent_stop, transform_tool_result]

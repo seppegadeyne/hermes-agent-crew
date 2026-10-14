@@ -80,6 +80,11 @@ whose result the lead has not seen yet.
 With tool search enabled, Hermes may defer both tools behind `tool_search`; the plugin's prompt
 section tells the model to call them through `tool_call` then.
 
+Scouting nudge: when the lead makes `nudge_after` (default 8) read or search calls in one turn
+without using agents, the plugin appends a one-line hint to that tool result that names the
+read-only agents. It fires once per turn, never for subagents, and never after the turn used
+agents.
+
 ## Agent files
 
 An agent is a Markdown file with a small frontmatter block, the format Claude Code uses for
@@ -147,6 +152,7 @@ plugins:
 | `diff_max_chars` | `20000` | Largest diff attached with `attach_diff`. |
 | `summary_max_chars` | `12000` | Longest report returned per run. |
 | `prompt_section` | `true` | Add the roster and a short usage guide to the lead's system prompt. |
+| `nudge_after` | `8` | After this many read or search calls by the lead in one turn without agents, append a one-time hint to use read-only agents. `0` turns it off. |
 
 Provider routing depends on the Hermes build:
 
@@ -164,7 +170,9 @@ Provider routing depends on the Hermes build:
   child can make its first tool call, and checks every call in `pre_tool_call`.
 - A read-only agent may use `read_file`, `search_files`, `web_search`, `web_extract`, `x_search`,
   `vision_analyze`, `session_search`, `skill_view`, `skills_list`, `todo_list`, `tool_search` and
-  `tool_describe`, plus MCP tools its file lists explicitly. Everything else is blocked: file
+  `tool_describe`, plus MCP tools its file lists explicitly. An agent with a `tools:` list may
+  always use `tool_search` and `tool_describe`, so it can reach its deferred MCP tools; a call
+  through `tool_call` is checked under the real tool's name. Everything else is blocked: file
   writes, `terminal`, `execute_code`, browser actions, memory, scheduling and unlisted MCP tools.
 - No agent can start agents: `agents_run`, `agents_status` and `delegate_task` are blocked for
   every child of this plugin.

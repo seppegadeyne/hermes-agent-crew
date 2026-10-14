@@ -38,7 +38,7 @@ def test_loader_registers_tools_hooks_command_and_prompt(loaded):
     record = loaded.manager._plugins["hermes-claude-agents"]
     assert not record.error, record.error
     assert {"agents_run", "agents_status"} <= loaded.manager._plugin_tool_names
-    for hook in ("pre_tool_call", "subagent_start", "subagent_stop"):
+    for hook in ("pre_tool_call", "subagent_start", "subagent_stop", "transform_tool_result"):
         assert loaded.plugins.has_hook(hook), hook
     text = loaded.manager._plugin_commands["claude-agents"]["handler"]("")
     assert "reviewer (opus" in text and "explorer (haiku" in text and "builder (sonnet" in text
@@ -114,3 +114,17 @@ def test_outside_an_agent_turn_the_tool_refuses(loaded):
     entry = registry.get_entry("agents_run", scope=loaded.manager.scope_key)
     out = json.loads(entry.handler({"tasks": [{"agent": "explorer", "goal": "x"}]}))
     assert out["error"] == "no_active_turn"
+
+
+def test_scouting_nudge_through_the_real_result_hook(loaded):
+    from agent.subagent_lifecycle import bind_subagent_parent
+    from model_tools import _apply_transform_tool_result_hook, _CallIds
+
+    parent = SimpleNamespace(session_id="lead", provider=DIRECT, model="sonnet", enabled_toolsets=None,
+                             _delegate_depth=0)
+    ids = _CallIds(task_id="lead", session_id="lead", tool_call_id="c", turn_id="turn-1", api_request_id="")
+    with bind_subagent_parent(parent):
+        out = [_apply_transform_tool_result_hook("read_file", {"path": "x"}, '{"content": "x"}', 1, ids)
+               for _ in range(8)]
+    assert out[:7] == ['{"content": "x"}'] * 7
+    assert "[hermes-claude-agents] 8 read/search calls" in out[7] and "explorer" in out[7]

@@ -16,6 +16,10 @@ from typing import Any
 # Agents never start other agents: the X-shaped "lead plans, agents execute" split stays flat, and a
 # child that could fan out would bypass the operator's limits.
 OWN_TOOLS = frozenset({"agents_run", "agents_status", "delegate_task"})
+# Tool search catalog reads. With tool search on, a child's MCP tools are deferred, so even an agent
+# with an explicit tool list needs these to reach them. They only list and describe tools the child's
+# own session may already use; the real call (through tool_call) is checked under its own name.
+CATALOG_TOOLS = frozenset({"tool_search", "tool_describe"})
 _GLOB_CHARS = frozenset("*?[")
 
 
@@ -39,11 +43,17 @@ class ChildPolicy:
         if tool_name in OWN_TOOLS:
             return (f"hermes-claude-agents: agent '{self.agent}' cannot start other agents. "
                     "Finish the task yourself and report back.")
-        if self.allowed is None:
+        if self.allowed is None or tool_name in CATALOG_TOOLS:
             return None
         if tool_name in self.allowed or any(fnmatch.fnmatchcase(tool_name, g) for g in self.globs):
             return None
         usable = ", ".join(sorted(self.allowed)[:14] + list(self.globs)) or "none"
+        if tool_name == "tool_call":
+            # Hermes unwraps a valid single tool_call before this check and checks the real tool; what lands
+            # here is a connector batch, an out-of-scope tool or arguments that failed the schema probe.
+            return (f"hermes-claude-agents: this tool_call was blocked for agent '{self.agent}': it is a batch, or "
+                    "it did not resolve to a tool this agent may use. Send one entry per tool_call, with the exact "
+                    f"name and arguments from tool_describe. Usable tools: {usable}.")
         if self.readonly:
             return (f"hermes-claude-agents: agent '{self.agent}' is read-only, so '{tool_name}' is blocked. "
                     f"Usable tools: {usable}. Investigate and report instead of changing anything.")
