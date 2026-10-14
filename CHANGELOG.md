@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 (2026-10-14)
+
+- The scouting nudge skips every failed result: Hermes' own `status`, and JSON results with a
+  non-empty `error`, `"success": false` or `"ok": false`. Before, only results starting with
+  `{"error"` were skipped.
+- Read-only shell commands are recognized by a shell tokenizer per segment (`&&`, `;`, `|`)
+  instead of a regex: quoted text such as `grep 'a>b'` or `grep -n "rm -rf"` counts as reading,
+  while `git branch NAME`, `git log --output=…`, `git -c …`, `find -fprint`, `sort -o`, `tee`,
+  file redirects and command substitution do not. `git -C <dir>`, `2>/dev/null`, `2>&1` and
+  input redirects are fine. Only the count changes; nothing is ever blocked by it.
+
 ## 0.4.0 (2026-10-14)
 
 Findings from a day of live sessions: leads delegated well once asked to, but rarely on their own.

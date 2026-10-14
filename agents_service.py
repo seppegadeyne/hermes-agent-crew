@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import contextvars
 import json
-import re
+import shlex
 import threading
 import time
 import uuid
@@ -43,11 +43,16 @@ TERMINAL = {"SUCCEEDED": "succeeded", "FAILED": "failed", "INTERRUPTED": "interr
 STOP_STATUS = {"completed": "succeeded", "interrupted": "interrupted", "cancelled": "cancelled"}
 # Lead tool calls that only look around. A run of them in one turn is the work a scout does cheaper.
 SCOUT_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract"})
-_READ_COMMAND = re.compile(
-    r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)*(?:grep|rg|cat|sed\s+-n|head|tail|find|ls|wc|tree|"
-    r"git\s+(?:log|show|diff|status|grep|blame))\b")
-_HARMLESS_REDIRECT = re.compile(r"\d?>\s*/dev/null|\d>&\d")
-_WRITE_HINT = re.compile(r">|\bxargs\b|-delete\b|-exec\b|\bsed\b[^|;&]*\s-i|\b(?:rm|mv|cp|tee|chmod)\b")
+# Shell programs that only read or filter. A terminal command counts as scouting when every segment
+# (split on &&, ||, ; and |) runs one of these and nothing writes a file.
+READ_PROGRAMS = frozenset({"cat", "grep", "egrep", "fgrep", "rg", "head", "tail", "ls", "wc", "tree", "find", "sed",
+                           "git", "sort", "uniq", "cut", "tr", "nl", "column", "stat", "file", "du", "jq"})
+GIT_READ_COMMANDS = frozenset({"log", "show", "diff", "status", "grep", "blame", "ls-files", "branch"})
+FIND_WRITE_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
+                                "-fls"})
+_SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
+_HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
+MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
 ISOLATION_MESSAGE = ("hermes-claude-agents needs plugins.isolation: in_process. Inside the plugin host process "
                      "Hermes cannot bind a launch to the running agent turn.")
@@ -185,7 +190,7 @@ class AgentsService:
         return {"action": "block", "message": message} if message else None
 
     def on_transform_tool_result(self, tool_name: Any = "", args: Any = None, result: Any = None, task_id: Any = "",
-                                 session_id: Any = "", turn_id: Any = "", **_: Any) -> str | None:
+                                 session_id: Any = "", turn_id: Any = "", status: Any = "", **_: Any) -> str | None:
         """Nudge a lead that keeps scouting by hand to hand the rest to read-only agents.
 
         Counts the lead's own read and search calls per turn; at ``nudge_after`` it appends one short
@@ -194,12 +199,12 @@ class AgentsService:
         """
         try:
             return self._nudge(str(tool_name or ""), args, result, str(task_id or ""), str(session_id or ""),
-                               str(turn_id or ""))
+                               str(turn_id or ""), status)
         except Exception:
             return None
 
     def _nudge(self, tool_name: str, args: Any, result: Any, task_id: str, session_id: str,
-               turn_id: str) -> str | None:
+               turn_id: str, status: Any = "") -> str | None:
         # Only model-facing calls of a live turn carry both ids. Calls from execute_code scripts and other
         # nested paths come without them, and their consumers parse the result as JSON: never touch those.
         if not session_id or not turn_id or not isinstance(result, str) or self.policies.get(task_id) is not None:
@@ -226,7 +231,7 @@ class AgentsService:
             count = state["count"]
         settings, _, roster = self.config()
         threshold = settings["nudge_after"]
-        if not threshold or count < threshold or result.lstrip().startswith('{"error"'):
+        if not threshold or count < threshold or is_error_result(result, status):
             return None
         scouts = sorted(spec.name for spec in roster.agents.values() if spec.readonly)
         if not scouts:
@@ -728,10 +733,109 @@ def _is_scouting(tool_name: str, args: Any) -> bool:
     if tool_name in SCOUT_TOOLS:
         return True
     if tool_name == "terminal" and isinstance(args, dict):
-        command = str(args.get("command") or "")
-        quiet = _HARMLESS_REDIRECT.sub(" ", command)  # 2>/dev/null and 2>&1 do not write anything
-        return bool(_READ_COMMAND.match(quiet)) and not _WRITE_HINT.search(quiet)
+        return is_read_command(str(args.get("command") or ""))
     return False
+
+
+def is_read_command(command: str) -> bool:
+    """True when every segment of a shell command only reads (cd prefixes allowed, at least one read)."""
+    if not command.strip() or len(command) > 4_000 or "\n" in command.strip() or "`" in command or "$(" in command:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:  # unbalanced quotes
+        return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SEGMENT_BREAKS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    reads = 0
+    for segment in segments:
+        if not segment:
+            continue
+        words = _strip_redirects(segment)
+        if words is None:
+            return False
+        if not words:
+            continue
+        if words[0] == "cd":
+            continue
+        if not _reads_only(words):
+            return False
+        reads += 1
+    return reads > 0
+
+
+def _strip_redirects(segment: list[str]) -> list[str] | None:
+    """The words of one segment without harmless redirects; None when it writes or reads stdin from a file."""
+    words: list[str] = []
+    i = 0
+    while i < len(segment):
+        token = segment[i]
+        if token in (">", ">>", ">|", "&>", "&>>"):
+            target = segment[i + 1] if i + 1 < len(segment) else ""
+            if target not in _HARMLESS_TARGETS:
+                return None
+            if words and words[-1].isdigit():
+                words.pop()  # the fd number of 2>/dev/null
+            i += 2
+            continue
+        if token in (">&", "<&"):
+            if words and words[-1].isdigit():
+                words.pop()  # 2>&1
+            i += 2
+            continue
+        if token in ("<", "<<", "<<<"):
+            i += 2  # input redirection reads; it never writes
+            continue
+        words.append(token)
+        i += 1
+    return words
+
+
+def _reads_only(words: list[str]) -> bool:
+    program = words[0].rsplit("/", 1)[-1]
+    if program not in READ_PROGRAMS:
+        return False
+    rest = words[1:]
+    if program == "sed":
+        return "-n" in rest and not any(w == "-i" or w.startswith(("-i", "--in-place")) for w in rest)
+    if program == "find":
+        return not FIND_WRITE_ACTIONS & set(rest)
+    if program == "git":
+        at = 0
+        while at < len(rest) and rest[at].startswith("-"):
+            if rest[at] == "-c":
+                return False  # -c can set any config, including programs git runs
+            at += 2 if rest[at] in ("-C", "--git-dir", "--work-tree") else 1  # global options with a value
+        sub, after = (rest[at], rest[at + 1:]) if at < len(rest) else ("", [])
+        if sub not in GIT_READ_COMMANDS or any(w.startswith("--output") for w in rest):
+            return False
+        # `git branch NAME` creates a branch; only listing flags count as reading.
+        return sub != "branch" or all(w in ("-a", "-r", "-v", "-vv", "--list", "--all") for w in after)
+    if program == "sort":
+        return not any(w == "-o" or w.startswith("--output") for w in rest)
+    return True
+
+
+def is_error_result(result: str, status: Any = "") -> bool:
+    """True for a failed tool call: Hermes' own status, or a JSON result that reports an error."""
+    if str(status or "").lower() in ("error", "failed", "blocked"):
+        return True
+    text = result.lstrip()
+    if not text.startswith("{") or len(text) > MAX_ERROR_PARSE_CHARS:
+        return False
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return bool(data.get("error")) or data.get("success") is False or data.get("ok") is False
 
 
 def nudge_text(count: int, scouts: list) -> str:

@@ -451,10 +451,35 @@ def test_nudge_leaves_script_and_error_results_alone(rig):
 
 
 def test_scouting_commands():
-    from hermes_claude_agents.agents_service import _is_scouting
-    for command in ("grep -rn foo src 2>/dev/null", "cd /r && git log --oneline -5 2>&1", "sed -n 1,40p a.py",
-                    "find . -name '*.py' | head", "ls -la; wc -l *.py"):
-        assert _is_scouting("terminal", {"command": command}), command
-    for command in ("cat > notes.txt", "find . -name x -delete", "sed -n 1p -i a.py", "grep -l x | xargs rm",
-                    "ls; rm x", "python -m pytest -q", "git commit -m x", "echo hi"):
-        assert not _is_scouting("terminal", {"command": command}), command
+    from hermes_claude_agents.agents_service import is_read_command
+    reads = ("grep -rn foo src 2>/dev/null", "cd /r && git log --oneline -5 2>&1", "sed -n 1,40p a.py",
+             "find . -name '*.py' | head", "ls -la; wc -l *.py", "grep -n 'cp' a.py", "grep 'a>b' notes.md",
+             "grep -n \"rm -rf\" deploy.sh", "git -C /r diff --stat", "git branch -a", "cat a.py | sort | uniq -c",
+             "jq .name package.json", "grep x < input.txt", "rg foo &>/dev/null")
+    for command in reads:
+        assert is_read_command(command), command
+    writes = ("cat > notes.txt", "find . -name x -delete", "sed -n 1p -i a.py", "sed -i -n 1p a.py",
+              "grep -l x | xargs rm", "ls; rm x", "python -m pytest -q", "git commit -m x", "echo hi",
+              "find . -fprint out.txt", "git log --output=log.txt", "git branch feature-x", "sort -o out a",
+              "cat a | tee b", "ls $(rm x)", "ls `rm x`", "cat 'unbalanced", "cd /r", "grep x a >> b",
+              "ls &> out.txt", "git -c core.pager=x log", "ls\nrm x")
+    for command in writes:
+        assert not is_read_command(command), command
+
+
+def test_error_results_get_no_hint():
+    from hermes_claude_agents.agents_service import is_error_result
+    for result in ('{"error": "x"}', '{"success": false, "message": "x"}', '{"ok": false}',
+                   ' {"output": "", "error": "boom", "exit_code": 1}'):
+        assert is_error_result(result), result
+    assert is_error_result('{"content": "x"}', status="error")
+    for result in ('{"content": "x"}', '{"success": true, "error": null}', '{"output": "x", "error": ""}',
+                   "plain text", "[1, 2]", "{not json"):
+        assert not is_error_result(result), result
+
+
+def test_nudge_skips_success_false_results(rig):
+    for _ in range(7):
+        lead_result(rig, "read_file")
+    assert lead_result(rig, "web_extract", result='{"success": false, "message": "403"}') is None
+    assert lead_result(rig, "read_file") is not None
