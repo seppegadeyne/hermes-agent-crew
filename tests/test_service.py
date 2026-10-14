@@ -338,6 +338,45 @@ def test_prompt_section(rig):
     assert rig.service.prompt_section({}) == ""
 
 
+def test_prompt_section_keeps_the_trigger_and_the_fan_out_rule(rig):
+    (rig.home / "claude-agents").mkdir()
+    (rig.home / "claude-agents" / "lang-checker.md").write_text(
+        "---\nname: lang-checker\nmodel: haiku\nreadonly: true\n"
+        "use_when: a whole text file needs the language MCP checks\n"
+        "description: " + "Mechanical language-check worker that reads a file. " * 6 + "\n---\nCheck.\n")
+    text = rig.service.prompt_section({})
+    line = next(x for x in text.splitlines() if x.startswith("- lang-checker"))
+    assert "Use when a whole text file needs the language MCP checks." in line
+    assert len(line) < 220 and "characters omitted" not in text
+    assert "Mechanical fan-out" in text and "COMPLETE input" in text and len(text) <= 3_800
+    assert "use when: a whole text file" in rig.service.roster_text()
+
+
+def test_a_full_roster_keeps_every_trigger_and_the_usage_guide(rig):
+    folder = rig.home / "claude-agents"
+    folder.mkdir()
+    for i in range(14):
+        name = f"worker-{i:02d}-" + "x" * 22
+        folder.joinpath(f"{name}.md").write_text(
+            f"---\nname: {name}\nmodel: haiku\nreadonly: true\n"
+            f"use_when: trigger {i:02d} " + "t" * 185 + "\n"
+            "description: " + "d" * 300 + "\n---\nWork.\n")
+    text = rig.service.prompt_section({})
+    assert len(text) <= 3_800 and "characters omitted" not in text
+    for marker in ("Call agents_run", "Mechanical fan-out", "wait come back as run_ids for agents_status."):
+        assert marker in text
+    shown = [line for line in text.splitlines() if line.startswith("- worker-")]
+    assert shown and all("t" * 185 in line for line in shown)
+    assert "more (/claude-agents lists them)" in text
+
+
+def test_trigger_phrasing():
+    from hermes_claude_agents.agents_config import AgentSpec
+    from hermes_claude_agents.agents_service import roster_line
+    assert roster_line(AgentSpec(name="a", use_when="when a file needs checks…")) == "Use when a file needs checks."
+    assert roster_line(AgentSpec(name="a", use_when="Use for X.", description="D")) == "Use for X. D"
+
+
 def test_roster_text_lists_agents_and_problems(rig):
     (rig.home / "claude-agents").mkdir()
     (rig.home / "claude-agents" / "bad.md").write_text("---\nname: BAD\n---\n")

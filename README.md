@@ -98,7 +98,8 @@ You review changes for injection, authentication and secret-handling bugs. Cite 
 | Key | Meaning |
 |---|---|
 | `name` | Lowercase letters, digits, `-` or `_` (max 32). Defaults to the file name. |
-| `description` | Shown to the lead in the roster. |
+| `description` | Shown to the lead in the roster (clipped there to fit the prompt budget). |
+| `use_when` | Short trigger shown whole before the description (over the prompt budget, descriptions shrink first), for example `a whole text file needs the language MCP checks`. This is what makes the lead pick the agent; `when_to_use` works too. Max 200 characters. |
 | `model` | Model name for the agent's provider; `inherit` uses the lead's model. |
 | `provider` | Provider for this agent; `inherit` passes none (see below). |
 | `readonly` | `true` limits the agent to read tools (see [Read-only](#how-read-only-is-enforced)). |

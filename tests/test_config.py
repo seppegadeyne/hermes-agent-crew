@@ -27,6 +27,21 @@ def defaults(raw=None):
     return cfg.read_settings(lambda key, default=None: raw.get(key, default))
 
 
+def test_use_when_is_parsed_and_clipped():
+    spec, warnings = cfg.spec_from_markdown("---\nname: a\nwhen_to_use: >\n  a file\n  needs checks\n---\nx\n")
+    assert spec.use_when == "a file needs checks" and not warnings
+    spec, warnings = cfg.spec_from_markdown("---\nname: a\nuse_when: " + "x" * 300 + "\n---\nx\n")
+    assert len(spec.use_when) == cfg.MAX_USE_WHEN_CHARS and warnings
+    spec, warnings = cfg.spec_from_markdown("---\nname: a\nuse_when: one\nwhen_to_use: two\n---\nx\n")
+    assert spec.use_when == "one" and any("when_to_use ignored" in w for w in warnings)
+
+
+def test_builtin_agents_have_a_trigger(hermes_home):
+    settings, _ = defaults()
+    roster = cfg.load_roster(settings, hermes_home)
+    assert all(roster.agents[n].use_when for n in ("builder", "explorer", "researcher", "reviewer"))
+
+
 def test_builtin_roster_has_the_four_roles(hermes_home):
     settings, problems = defaults()
     roster = cfg.load_roster(settings, hermes_home)

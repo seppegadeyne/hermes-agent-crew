@@ -11,7 +11,8 @@ uses for ``~/.claude/agents/*.md``::
     ---
     Instructions for the agent (the Markdown body).
 
-Supported keys: ``name``, ``description``, ``model`` (``inherit`` = the parent's model),
+Supported keys: ``name``, ``description``, ``use_when`` or ``when_to_use`` (the trigger shown to the lead),
+``model`` (``inherit`` = the parent's model),
 ``provider``, ``readonly``, ``tools`` (Hermes tool names, or Claude Code names such as Read,
 Grep, Glob, WebFetch, Bash, Edit), ``toolsets`` (Hermes toolsets to narrow the child to) and
 ``effort``. Unknown keys are ignored with a warning, so Claude Code files load unchanged.
@@ -41,6 +42,7 @@ TOOLSET_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 MAX_DESCRIPTION_CHARS = 300
+MAX_USE_WHEN_CHARS = 200
 MAX_INSTRUCTIONS_CHARS = 12_000
 
 # Tools a read-only agent may use. Everything else (file writes, shell, code execution, browser
@@ -68,7 +70,7 @@ CLAUDE_CODE_TOOLS: dict[str, tuple[str, ...]] = {
     "task": (),  # Claude Code's own subagent launcher: agents never start agents here
 }
 KNOWN_KEYS = frozenset({
-    "name", "description", "model", "provider", "tools", "toolsets", "readonly", "read_only",
+    "name", "description", "use_when", "when_to_use", "model", "provider", "tools", "toolsets", "readonly", "read_only",
     "read-only", "effort", "reasoning_effort",
     "color",  # Claude Code UI colour: cosmetic, ignored without a warning
 })
@@ -110,6 +112,7 @@ class NotAnAgent(ValueError):
 class AgentSpec:
     name: str
     description: str = ""
+    use_when: str = ""
     model: str | None = None
     provider: str | None = None
     readonly: bool = False
@@ -299,6 +302,13 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
     if len(description) > MAX_DESCRIPTION_CHARS:
         description = description[:MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
         warnings.append(f"description clipped to {MAX_DESCRIPTION_CHARS} characters")
+    use_when_key = next((k for k in ("use_when", "when_to_use") if k in meta), None)
+    if "use_when" in meta and "when_to_use" in meta:
+        warnings.append("when_to_use ignored: use_when is set")
+    use_when = " ".join((_opt_str(meta[use_when_key], use_when_key) or "").split()) if use_when_key else ""
+    if len(use_when) > MAX_USE_WHEN_CHARS:
+        use_when = use_when[:MAX_USE_WHEN_CHARS - 1].rstrip() + "…"
+        warnings.append(f"{use_when_key} clipped to {MAX_USE_WHEN_CHARS} characters")
     model = _check_model(_opt_str(meta.get("model"), "model"))
     provider = _check_provider(_opt_str(meta.get("provider"), "provider"))
     readonly_key = next((k for k in ("readonly", "read_only", "read-only") if k in meta), None)
@@ -329,8 +339,8 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
     if len(body) > MAX_INSTRUCTIONS_CHARS:
         raise ValueError(f"instructions are longer than {MAX_INSTRUCTIONS_CHARS} characters")
     warnings.extend(f"ignored key {key!r}" for key in meta if key not in KNOWN_KEYS)
-    spec = AgentSpec(name=name, description=description, model=model, provider=provider, readonly=readonly,
-                     tools=tools, toolsets=toolsets, effort=effort, instructions=body, source=source)
+    spec = AgentSpec(name=name, description=description, use_when=use_when, model=model, provider=provider,
+                     readonly=readonly, tools=tools, toolsets=toolsets, effort=effort, instructions=body, source=source)
     return spec, warnings
 
 

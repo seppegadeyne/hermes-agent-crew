@@ -1,6 +1,7 @@
 ---
 name: researcher
 description: Read-only docs and web researcher (Haiku). Looks up library, API and spec documentation, changelogs and known issues, and quotes the source.
+use_when: you need library, API or spec documentation, a changelog or a known issue, with sources
 model: haiku
 readonly: true
 ---

@@ -1,6 +1,7 @@
 ---
 name: reviewer
 description: Senior read-only reviewer (Opus). Use before locking a multi-file plan, when the same test or build error fails twice, and before calling non-trivial work done. Pass attach_diff for diff reviews.
+use_when: locking a multi-file plan, the same error failed twice, or before calling non-trivial work done
 model: opus
 readonly: true
 ---

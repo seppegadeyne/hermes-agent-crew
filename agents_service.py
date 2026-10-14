@@ -634,6 +634,8 @@ class AgentsService:
             if spec.readonly:
                 flags.append("read-only")
             lines.append(f"  {spec.name} ({', '.join(flags)}) - {spec.description or '(no description)'}")
+            if spec.use_when:
+                lines.append(f"    use when: {spec.use_when}")
         lines.append("Agent folders (a later folder overrides an earlier one): " + "; ".join(roster.folders))
         lines.append("This Hermes build: per-agent provider=" + ("yes" if features["provider"] else "no")
                      + ", per-agent effort=" + ("yes" if features["effort"] else "no"))
@@ -663,34 +665,78 @@ def agent_label(spec: AgentSpec) -> str:
     return f"{spec.name} ({', '.join(flags)})"
 
 
+def _shorten(text: str, limit: int) -> str:
+    """Inline clip for one roster line: a plain ellipsis, no line break or character count."""
+    if limit <= 0:
+        return ""
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def roster_line(spec: AgentSpec, description_chars: int = 90) -> str:
+    """The trigger (use_when) is kept whole; the description fills ``description_chars``."""
+    if not spec.use_when:
+        return _shorten(spec.description, max(60, description_chars + 70))
+    trigger = spec.use_when.rstrip(".…").rstrip()
+    lowered = trigger.lower()
+    if lowered.startswith("when "):
+        trigger = "Use " + trigger
+    elif not lowered.startswith("use "):
+        trigger = "Use when " + trigger
+    return f"{trigger}. {_shorten(spec.description, description_chars)}".rstrip()
+
+
+_PROMPT_HEAD = [
+    "Claude agents: named subagents for token-efficient delegation. You plan, decide and verify; agents do "
+    "bounded work in their own context and return compact reports, so your context stays small.",
+    "Roster:",
+]
+_PROMPT_TAIL = [
+    'Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", "workdir": '
+    '"/abs/path/to/repo"}]}. If it is a deferred tool, call it through tool_call with name "agents_run". '
+    "Several tasks in one call run in parallel. Set workdir to the folder the work is in; it defaults to this "
+    "session's working directory.",
+    "When to use it:",
+    "- Swarm: send read-only scouts for file discovery, grep sweeps and docs lookups instead of reading many "
+    "files yourself.",
+    "- Senior review on call: ask the reviewer (1) before you lock a multi-file plan, (2) when the same test or "
+    "build error fails twice, (3) before you call non-trivial work done; pass attach_diff: true so it reads "
+    "the diff itself.",
+    "- Mechanical fan-out: whole-document checks and extractions (language or lint MCP checks over a file, "
+    "page extraction) go to one worker per file or URL, in parallel, over the COMPLETE input. Do not sample "
+    "excerpts inline to save calls; a short text (under ~1,000 characters) you may check inline.",
+    "- Skip agents for small lookups: every agent starts with a fresh context.",
+    "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
+    "what you already know). Treat their reports as evidence to check, not as facts. Runs that outlive the "
+    "wait come back as run_ids for agents_status.",
+]
+
+
 def render_prompt(roster: Roster, limit: int = 3_800) -> str:
-    agents = sorted(roster.agents.values(), key=lambda s: s.name)
-    lines = [
-        "Claude agents: named subagents for token-efficient delegation. You plan, decide and verify; agents do "
-        "bounded work in their own context and return compact reports, so your context stays small.",
-        "Roster:",
-    ]
-    for spec in agents[:12]:
-        lines.append(f"- {agent_label(spec)}: {clip(spec.description, 160)}")
-    if len(agents) > 12:
-        lines.append(f"- … {len(agents) - 12} more (/claude-agents lists them)")
-    lines += [
-        'Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", "workdir": '
-        '"/abs/path/to/repo"}]}. If it is a deferred tool, call it through tool_call with name "agents_run". '
-        "Several tasks in one call run in parallel. Set workdir to the folder the work is in; it defaults to this "
-        "session's working directory.",
-        "When to use it:",
-        "- Swarm: send read-only scouts for file discovery, grep sweeps and docs lookups instead of reading many "
-        "files yourself.",
-        "- Senior review on call: ask the reviewer (1) before you lock a multi-file plan, (2) when the same test or "
-        "build error fails twice, (3) before you call non-trivial work done; pass attach_diff: true so it reads "
-        "the diff itself.",
-        "- Skip agents for small lookups: every agent starts with a fresh context.",
-        "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
-        "what you already know). Treat their reports as evidence to check, not as facts. Runs that outlive the "
-        "wait come back as run_ids for agents_status.",
-    ]
-    return clip("\n".join(lines), limit)
+    """Head and usage guide always survive; the roster gets the space that is left.
+
+    Over budget, descriptions shrink first (triggers stay whole), then agents move to a "… N more" line.
+    """
+    agents = sorted(roster.agents.values(), key=lambda s: s.name)[:12]
+    hidden = len(roster.agents) - len(agents)
+    fixed = len("\n".join(_PROMPT_HEAD + _PROMPT_TAIL)) + 1
+    budget = limit - fixed
+
+    def roster_block(shown: list[AgentSpec], description_chars: int, more: int) -> list[str]:
+        block = [f"- {agent_label(spec)}: {roster_line(spec, description_chars)}" for spec in shown]
+        if more:
+            block.append(f"- … {more} more (/claude-agents lists them)")
+        return block
+
+    block: list[str] = []
+    for count in range(len(agents), -1, -1):
+        for description_chars in (90, 40, 0):
+            block = roster_block(agents[:count], description_chars, hidden + len(agents) - count)
+            if len("\n".join(block)) + 1 <= budget:
+                break
+        else:
+            continue
+        break
+    return clip("\n".join(_PROMPT_HEAD + block + _PROMPT_TAIL), limit)
 
 
 def tool_description(roster: Roster) -> str:

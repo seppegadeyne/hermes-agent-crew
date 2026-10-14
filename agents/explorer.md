@@ -1,6 +1,7 @@
 ---
 name: explorer
 description: Fast read-only codebase scout (Haiku). Finds files, symbols, call sites and config; maps how a feature is wired. Send several in parallel for separate areas.
+use_when: you would otherwise read or grep many files to find where something lives or how it is wired
 model: haiku
 readonly: true
 ---
