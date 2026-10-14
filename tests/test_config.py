@@ -116,7 +116,7 @@ def test_settings_overrides_and_validation(hermes_home):
         "overrides": {"reviewer": {"model": "sonnet"}, "builder": {"enabled": False},
                       "ghost": {"model": "haiku"}, "explorer": {"color": "red"}},
         "max_parallel": 99, "provider": "inherit", "prompt_section": "yes"})
-    assert settings["max_parallel"] == 6 and any("max_parallel" in p for p in problems)
+    assert settings["max_parallel"] == 12 and any("max_parallel" in p for p in problems)
     assert settings["prompt_section"] is True and any("prompt_section" in p for p in problems)
     roster = cfg.load_roster(settings, hermes_home)
     assert roster.agents["reviewer"].model == "sonnet"

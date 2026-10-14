@@ -84,8 +84,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "import_claude_code_agents": False,
     "provider": DEFAULT_PROVIDER,
     "overrides": {},
-    "max_parallel": 6,
-    "max_live_runs": 8,
+    "max_parallel": 12,
+    "max_live_runs": 24,
     "max_parallel_writers": 1,
     "wait_seconds": 600,
     "diff_max_chars": 20_000,
@@ -93,8 +93,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "prompt_section": True,
 }
 INT_RANGES = {
-    "max_parallel": (1, 8),
-    "max_live_runs": (1, 16),
+    "max_parallel": (1, 16),
+    "max_live_runs": (1, 32),
     "max_parallel_writers": (0, 8),
     "wait_seconds": (0, 1800),
     "diff_max_chars": (1000, 30_000),

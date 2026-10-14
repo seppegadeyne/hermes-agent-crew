@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2026-10-14)
+
+- Higher defaults for read-only swarms: `max_parallel` 6 -> 12 (cap 8 -> 16) and `max_live_runs`
+  8 -> 24 (cap 16 -> 32). A six-task Haiku swarm finished in about 22 s, so the old limit, not
+  the agents, was the bottleneck. Writers stay at one at a time.
+
 ## 0.2.0 (2026-10-13)
 
 - Tasks take an optional `workdir`: the absolute path of the folder the agent works in, and the

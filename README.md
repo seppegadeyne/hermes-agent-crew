@@ -139,8 +139,8 @@ plugins:
 | `agent_dirs` | `["{hermes_home}/claude-agents"]` | Extra agent folders. |
 | `import_claude_code_agents` | `false` | Also load `~/.claude/agents`. |
 | `overrides` | `{}` | Per agent: `model`, `provider`, `effort`, `enabled`. |
-| `max_parallel` | `6` | Tasks per `agents_run` call (1-8). |
-| `max_live_runs` | `8` | Runs in progress per conversation (1-16). |
+| `max_parallel` | `12` | Tasks per `agents_run` call (1-16). |
+| `max_live_runs` | `24` | Runs in progress per conversation (1-32). |
 | `max_parallel_writers` | `1` | Agents that can change files running at once (0-8). |
 | `wait_seconds` | `600` | Default wait, always capped below the tool deadline. |
 | `diff_max_chars` | `20000` | Largest diff attached with `attach_diff`. |

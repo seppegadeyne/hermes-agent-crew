@@ -1,5 +1,5 @@
 name: hermes-claude-agents
-version: 0.2.0
+version: 0.2.1
 description: "Named Claude subagents for Hermes: Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format) with a fixed model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone
@@ -32,14 +32,14 @@ config_schema:
     description: "Change an agent without editing its file, for example {\"reviewer\": {\"model\": \"sonnet\"}, \"builder\": {\"enabled\": false}}. Keys: model, provider, effort, enabled."
   max_parallel:
     type: int
-    default: 6
+    default: 12
     label: Agents per call
-    description: Most tasks one agents_run call may start (1-8).
+    description: Most tasks one agents_run call may start (1-16).
   max_live_runs:
     type: int
-    default: 8
+    default: 24
     label: Live runs per conversation
-    description: Most agent runs one conversation may have in progress (1-16).
+    description: Most agent runs one conversation may have in progress (1-32).
   max_parallel_writers:
     type: int
     default: 1
