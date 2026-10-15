@@ -1,4 +1,4 @@
-"""Run orchestration for hermes-claude-agents: launch, wait, collect, cancel, guard.
+"""Run orchestration for heremes-codex-agents: launch, wait, collect, cancel, guard.
 
 Children are launched through Hermes' public subagent lifecycle API, so they take the same host
 path as ``delegate_task`` children (cleanup, cost roll-up, ``/stop`` propagation, the live subagent
@@ -28,7 +28,7 @@ from . import agents_git
 from .agents_config import INT_RANGES, AgentSpec, Roster, RosterCache, read_settings
 from .agents_policy import ChildPolicy, PolicyRegistry
 
-PLUGIN_ID = "hermes-claude-agents"
+PLUGIN_ID = "heremes-codex-agents"
 MAX_GOAL_CHARS = 12_000
 MAX_CALLER_CONTEXT_CHARS = 24_000
 CONTEXT_BUDGET = 31_500          # the lifecycle API refuses a context over 32,000 characters
@@ -54,7 +54,7 @@ _SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
 _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
-ISOLATION_MESSAGE = ("hermes-claude-agents needs plugins.isolation: in_process. Inside the plugin host process "
+ISOLATION_MESSAGE = ("heremes-codex-agents needs plugins.isolation: in_process. Inside the plugin host process "
                      "Hermes cannot bind a launch to the running agent turn.")
 
 
@@ -135,7 +135,7 @@ class AgentsService:
         self._lock = threading.RLock()
         self._runs: OrderedDict[str, Run] = OrderedDict()
         self._by_child_session: dict[str, str] = {}
-        self._intent: contextvars.ContextVar = contextvars.ContextVar("hermes_claude_agents_intent", default=None)
+        self._intent: contextvars.ContextVar = contextvars.ContextVar("heremes_codex_agents_intent", default=None)
         self._nudges: OrderedDict[str, dict] = OrderedDict()  # lead session id -> this turn's scouting count
 
     # ------------------------------------------------------------------ configuration
@@ -186,7 +186,7 @@ class AgentsService:
         try:
             message = policy.decide(str(tool_name or ""))
         except Exception:
-            message = f"hermes-claude-agents: the tool policy check for agent '{policy.agent}' failed; blocked."
+            message = f"heremes-codex-agents: the tool policy check for agent '{policy.agent}' failed; blocked."
         return {"action": "block", "message": message} if message else None
 
     def on_transform_tool_result(self, tool_name: Any = "", args: Any = None, result: Any = None, task_id: Any = "",
@@ -354,7 +354,7 @@ class AgentsService:
         if len(raw) > settings["max_parallel"]:
             raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call; nothing was started. "
                                             "Send the rest in a second agents_run call, or merge related tasks.")
-        names = ", ".join(sorted(roster.agents)) or "none (see /claude-agents)"
+        names = ", ".join(sorted(roster.agents)) or "none (see /codex-agents)"
         tasks = []
         for index, item in enumerate(raw):
             where = f"tasks[{index}]"
@@ -685,7 +685,7 @@ class AgentsService:
                 out["next"] = "Stopped waiting after an interrupt; agents that were not stopped keep working."
         notes = list(problems or [])
         if roster is not None and roster.problems:
-            notes.append(f"{len(roster.problems)} agent file problem(s); /claude-agents lists them.")
+            notes.append(f"{len(roster.problems)} agent file problem(s); /codex-agents lists them.")
         if notes:
             out["config_problems"] = notes[:5]
         return out
@@ -840,7 +840,7 @@ def is_error_result(result: str, status: Any = "") -> bool:
 
 def nudge_text(count: int, scouts: list) -> str:
     names = ", ".join(scouts[:4])
-    return (f"[hermes-claude-agents] {count} read/search calls by hand in this turn. If more lookups follow, "
+    return (f"[heremes-codex-agents] {count} read/search calls by hand in this turn. If more lookups follow, "
             f"send them to read-only agents ({names}) in ONE agents_run call, one task per question or area, "
             "and keep your own context for decisions. Keep going yourself if you are nearly done.")
 
@@ -912,7 +912,7 @@ def render_prompt(roster: Roster, limit: int = 3_800) -> str:
     def roster_block(shown: list[AgentSpec], description_chars: int, more: int) -> list[str]:
         block = [f"- {agent_label(spec)}: {roster_line(spec, description_chars)}" for spec in shown]
         if more:
-            block.append(f"- … {more} more (/claude-agents lists them)")
+            block.append(f"- … {more} more (/codex-agents lists them)")
         return block
 
     block: list[str] = []

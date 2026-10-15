@@ -230,11 +230,11 @@ def test_inherited_model_on_another_provider_is_refused(rig):
 
 def test_inherited_model_on_the_lead_provider_is_the_lead_model(rig):
     rig.host.fields = rig.host.fields | {"provider"}
-    rig.host.parent_agent.model = "claude-sonnet-5-5"
+    rig.host.parent_agent.model = "sonnet"
     rig.host.settings = {"overrides": {"explorer": {"model": "inherit"}}}
     run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
     request = rig.lifecycle.requests[0]
-    assert (request.provider, request.model) == (DIRECT, "claude-sonnet-5-5")
+    assert (request.provider, request.model) == (DIRECT, "sonnet")
 
 
 def test_inherit_provider_runs_on_the_lead_route(rig):
@@ -272,7 +272,7 @@ def test_unknown_handle_falls_back_to_the_stop_hook(rig):
 
 
 def test_attach_diff_puts_the_snapshot_in_the_child_context(rig, monkeypatch):
-    from hermes_claude_agents import agents_git
+    from heremes_codex_agents import agents_git
     seen = {}
 
     def collect(cwd, base, budget):
@@ -286,7 +286,7 @@ def test_attach_diff_puts_the_snapshot_in_the_child_context(rig, monkeypatch):
 
 
 def test_workdir_scopes_the_agent_and_the_diff(rig, monkeypatch, tmp_path):
-    from hermes_claude_agents import agents_git
+    from heremes_codex_agents import agents_git
     repo = tmp_path / "repo"
     repo.mkdir()
     seen = {}
@@ -298,7 +298,7 @@ def test_workdir_scopes_the_agent_and_the_diff(rig, monkeypatch, tmp_path):
 
 
 def test_without_workdir_the_session_folder_is_used(rig, monkeypatch):
-    from hermes_claude_agents import agents_git
+    from heremes_codex_agents import agents_git
     seen = {}
     monkeypatch.setattr(agents_git, "collect", lambda cwd, base, budget: seen.setdefault("cwd", cwd) and "+x")
     run(rig, [{"agent": "reviewer", "goal": "done check", "attach_diff": True}], wait_seconds=0)
@@ -339,8 +339,8 @@ def test_prompt_section(rig):
 
 
 def test_prompt_section_keeps_the_trigger_and_the_fan_out_rule(rig):
-    (rig.home / "claude-agents").mkdir()
-    (rig.home / "claude-agents" / "lang-checker.md").write_text(
+    (rig.home / "codex-agents").mkdir()
+    (rig.home / "codex-agents" / "lang-checker.md").write_text(
         "---\nname: lang-checker\nmodel: haiku\nreadonly: true\n"
         "use_when: a whole text file needs the language MCP checks\n"
         "description: " + "Mechanical language-check worker that reads a file. " * 6 + "\n---\nCheck.\n")
@@ -353,7 +353,9 @@ def test_prompt_section_keeps_the_trigger_and_the_fan_out_rule(rig):
 
 
 def test_a_full_roster_keeps_every_trigger_and_the_usage_guide(rig):
-    folder = rig.home / "claude-agents"
+    rig.host.settings = {"overrides": {"codex-" + name: {"enabled": False}
+                                      for name in ("builder", "reviewer", "explorer", "researcher")}}
+    folder = rig.home / "codex-agents"
     folder.mkdir()
     for i in range(14):
         name = f"worker-{i:02d}-" + "x" * 22
@@ -367,19 +369,19 @@ def test_a_full_roster_keeps_every_trigger_and_the_usage_guide(rig):
         assert marker in text
     shown = [line for line in text.splitlines() if line.startswith("- worker-")]
     assert shown and all("t" * 185 in line for line in shown)
-    assert "more (/claude-agents lists them)" in text
+    assert "more (/codex-agents lists them)" in text
 
 
 def test_trigger_phrasing():
-    from hermes_claude_agents.agents_config import AgentSpec
-    from hermes_claude_agents.agents_service import roster_line
+    from heremes_codex_agents.agents_config import AgentSpec
+    from heremes_codex_agents.agents_service import roster_line
     assert roster_line(AgentSpec(name="a", use_when="when a file needs checks…")) == "Use when a file needs checks."
     assert roster_line(AgentSpec(name="a", use_when="Use for X.", description="D")) == "Use for X. D"
 
 
 def test_roster_text_lists_agents_and_problems(rig):
-    (rig.home / "claude-agents").mkdir()
-    (rig.home / "claude-agents" / "bad.md").write_text("---\nname: BAD\n---\n")
+    (rig.home / "codex-agents").mkdir()
+    (rig.home / "codex-agents" / "bad.md").write_text("---\nname: BAD\n---\n")
     text = rig.service.roster_text()
     assert "reviewer (opus, claude-subscription-directsdk-experimental, read-only)" in text
     assert "problem:" in text and "bad.md" in text
@@ -395,7 +397,7 @@ def test_nudge_fires_once_after_a_run_of_manual_scouting(rig):
         assert lead_result(rig, "read_file") is None
     assert lead_result(rig, "write_file") is None  # edits do not count
     hinted = lead_result(rig, "terminal", {"command": "cd /repo && grep -n foo src/*.py"})
-    assert hinted.startswith('{"content": "x"}\n\n[hermes-claude-agents] 8 read/search calls')
+    assert hinted.startswith('{"content": "x"}\n\n[heremes-codex-agents] 8 read/search calls')
     assert "explorer" in hinted and "agents_run" in hinted and "builder" not in hinted
     assert lead_result(rig, "read_file") is None  # once per turn
     for _ in range(7):
@@ -432,8 +434,8 @@ def test_nudge_never_raises_and_ignores_odd_input(rig):
 
 
 def test_schema_allows_what_the_settings_allow(plugin):
-    from hermes_claude_agents.agents_config import INT_RANGES
-    from hermes_claude_agents.agents_tools import schema
+    from heremes_codex_agents.agents_config import INT_RANGES
+    from heremes_codex_agents.agents_tools import schema
     assert schema("agents_run")["parameters"]["properties"]["tasks"]["maxItems"] == INT_RANGES["max_parallel"][1]
 
 
@@ -451,7 +453,7 @@ def test_nudge_leaves_script_and_error_results_alone(rig):
 
 
 def test_scouting_commands():
-    from hermes_claude_agents.agents_service import is_read_command
+    from heremes_codex_agents.agents_service import is_read_command
     reads = ("grep -rn foo src 2>/dev/null", "cd /r && git log --oneline -5 2>&1", "sed -n 1,40p a.py",
              "find . -name '*.py' | head", "ls -la; wc -l *.py", "grep -n 'cp' a.py", "grep 'a>b' notes.md",
              "grep -n \"rm -rf\" deploy.sh", "git -C /r diff --stat", "git branch -a", "cat a.py | sort | uniq -c",
@@ -468,7 +470,7 @@ def test_scouting_commands():
 
 
 def test_error_results_get_no_hint():
-    from hermes_claude_agents.agents_service import is_error_result
+    from heremes_codex_agents.agents_service import is_error_result
     for result in ('{"error": "x"}', '{"success": false, "message": "x"}', '{"ok": false}',
                    ' {"output": "", "error": "boom", "exit_code": 1}'):
         assert is_error_result(result), result
@@ -483,3 +485,38 @@ def test_nudge_skips_success_false_results(rig):
         lead_result(rig, "read_file")
     assert lead_result(rig, "web_extract", result='{"success": false, "message": "403"}') is None
     assert lead_result(rig, "read_file") is not None
+
+
+def test_codex_default_route_and_builtin_effort_reach_lifecycle(rig):
+    rig.host.fields = rig.host.fields | {"provider", "reasoning_effort"}
+    rig.host.parent_agent.provider = "anthropic"
+    rig.host.parent_agent.model = "claude-sonnet-4-5"
+    run(rig, [{"agent": name, "goal": "Inspect"} for name in
+              ("codex-reviewer", "codex-builder", "codex-explorer", "codex-researcher")], wait_seconds=0)
+    assert [(r.provider, r.model, r.reasoning_effort) for r in rig.lifecycle.requests] == [
+        ("openai-codex", "gpt-6.1-sol-900k", "high"),
+        ("openai-codex", "gpt-6.1-sol-900k", "medium"),
+        ("openai-codex", "gpt-6-luna-900k", "low"),
+        ("openai-codex", "gpt-6-luna-900k", "low"),
+    ]
+
+
+def test_none_effort_reaches_lifecycle(rig):
+    rig.host.fields = rig.host.fields | {"provider", "reasoning_effort"}
+    rig.host.settings = {"overrides": {"explorer": {"effort": "none"}}}
+    run(rig, [{"agent": "explorer", "goal": "Inspect"}], wait_seconds=0)
+    assert rig.lifecycle.requests[0].reasoning_effort == "none"
+
+
+def test_mixed_provider_readers_and_shared_writer_limit(rig):
+    rig.host.fields = rig.host.fields | {"provider", "reasoning_effort"}
+    out = run(rig, [{"agent": name, "goal": "Inspect"} for name in ("explorer", "codex-explorer")],
+              wait_seconds=0)
+    assert len(out["pending"]) == 2
+    assert [(r.provider, r.model) for r in rig.lifecycle.requests] == [
+        (DIRECT, "haiku"), ("openai-codex", "gpt-6-luna-900k")]
+    assert all(check["action"] == "block" for check in rig.lifecycle.checks_during_launch)
+    out = run(rig, [{"agent": name, "goal": "Build"} for name in ("builder", "codex-builder")],
+              wait_seconds=0)
+    assert out["error"] == "too_many_writers"
+    assert len(rig.lifecycle.requests) == 2

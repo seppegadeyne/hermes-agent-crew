@@ -1,14 +1,13 @@
-name: hermes-claude-agents
-version: 0.4.1
-description: "Named Claude subagents for Hermes: Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format) with a fixed model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
-author: Seppe Gadeyne
+name: heremes-codex-agents
+version: 0.2.0
+description: "Claude subagents for Hermes with additional Codex subscription agents: original Opus/Sonnet/Haiku roles plus explicit Sol/Luna roles. Agents are Markdown files (the Claude Code agent format) with a fixed model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
+author: Francisco; adapted from Seppe Gadeyne
 kind: standalone
 manifest_version: 2
 api_version: 1
 requires_hermes: ">=0.21.6"
 license: MIT
-homepage: https://github.com/seppegadeyne/hermes-claude-agents
-tags: [delegation, subagents, claude, orchestration]
+tags: [delegation, subagents, claude, codex, orchestration]
 config_schema:
   provider:
     type: str
@@ -17,7 +16,7 @@ config_schema:
     description: Provider the agents run on unless an agent file names its own. Use inherit to run them on the lead agent's provider.
   agent_dirs:
     type: list
-    default: ["{hermes_home}/claude-agents"]
+    default: ["{hermes_home}/claude-agents", "{hermes_home}/codex-agents"]
     label: Agent folders
     description: Folders with agent Markdown files, read after the built-in agents. A later file with the same name replaces an earlier one.
   import_claude_code_agents:
@@ -29,7 +28,7 @@ config_schema:
     type: dict
     default: {}
     label: Per-agent overrides
-    description: "Change an agent without editing its file, for example {\"reviewer\": {\"model\": \"sonnet\"}, \"builder\": {\"enabled\": false}}. Keys: model, provider, effort, enabled."
+    description: "Change an agent without editing its file, for example {\"codex-reviewer\": {\"model\": \"gpt-6.1-sol-900k\"}, \"builder\": {\"enabled\": false}}. Keys: model, provider, effort, enabled."
   max_parallel:
     type: int
     default: 12

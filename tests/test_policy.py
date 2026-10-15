@@ -1,6 +1,6 @@
 """The per-child tool policy."""
-from hermes_claude_agents.agents_config import spec_from_markdown
-from hermes_claude_agents.agents_policy import ChildPolicy, PolicyRegistry
+from heremes_codex_agents.agents_config import spec_from_markdown
+from heremes_codex_agents.agents_policy import ChildPolicy, PolicyRegistry
 
 
 def policy_for(text):

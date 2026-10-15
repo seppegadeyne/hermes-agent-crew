@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_claude_agents import agents_config as cfg
+from heremes_codex_agents import agents_config as cfg
 
 CLAUDE_CODE_AGENT = """---
 name: code-reviewer
@@ -42,16 +42,18 @@ def test_builtin_agents_have_a_trigger(hermes_home):
     assert all(roster.agents[n].use_when for n in ("builder", "explorer", "researcher", "reviewer"))
 
 
-def test_builtin_roster_has_the_four_roles(hermes_home):
+def test_builtin_roster_preserves_claude_and_adds_codex_roles(hermes_home):
     settings, problems = defaults()
     roster = cfg.load_roster(settings, hermes_home)
     assert problems == [] and roster.problems == []
-    assert set(roster.agents) == {"reviewer", "explorer", "researcher", "builder"}
+    assert set(roster.agents) == {"reviewer", "explorer", "researcher", "builder",
+                                  "codex-reviewer", "codex-builder", "codex-explorer", "codex-researcher"}
     assert (roster.agents["reviewer"].model, roster.agents["reviewer"].readonly) == ("opus", True)
     assert (roster.agents["explorer"].model, roster.agents["explorer"].readonly) == ("haiku", True)
     assert (roster.agents["researcher"].model, roster.agents["researcher"].readonly) == ("haiku", True)
     assert (roster.agents["builder"].model, roster.agents["builder"].readonly) == ("sonnet", False)
-    assert all(spec.provider == cfg.DEFAULT_PROVIDER for spec in roster.agents.values())
+    assert all(roster.agents[n].provider == cfg.DEFAULT_PROVIDER
+               for n in ("reviewer", "builder", "explorer", "researcher"))
     assert all(spec.instructions for spec in roster.agents.values())
 
 
@@ -85,6 +87,22 @@ def test_model_inherit_means_the_lead_model():
     assert spec.model is None and spec.provider is None
 
 
+def test_explicit_provider_inherit_survives_global_default(hermes_home):
+    settings, _ = defaults({"overrides": {"reviewer": {"provider": "inherit"}}})
+    roster = cfg.load_roster(settings, hermes_home)
+    assert roster.agents["reviewer"].provider is None
+    assert roster.agents["builder"].provider == "claude-subscription-directsdk-experimental"
+
+
+def test_agent_file_provider_inherit_survives_global_default(hermes_home):
+    write(hermes_home / "codex-agents", "local.md",
+          "---\nname: local\nmodel: inherit\nprovider: inherit\n---\nFollow the lead.")
+    settings, _ = defaults()
+    roster = cfg.load_roster(settings, hermes_home)
+    assert roster.agents["local"].provider is None
+    assert roster.agents["local"].model is None
+
+
 def test_frontmatter_shapes():
     spec, warnings = cfg.spec_from_markdown(
         '---\nname: "scout"\ndescription: >\n  Finds things\n  fast.\ntools:\n  - Read\n  - "WebFetch"\n'
@@ -110,13 +128,13 @@ def test_invalid_agent_files(text, message):
 
 
 def test_markdown_without_frontmatter_is_skipped(hermes_home):
-    write(hermes_home / "claude-agents", "README.md", "# My agents\n")
+    write(hermes_home / "codex-agents", "README.md", "# My agents\n")
     settings, _ = defaults()
     assert cfg.load_roster(settings, hermes_home).problems == []
 
 
 def test_user_folder_overrides_builtin_and_reports_bad_files(hermes_home):
-    agents = hermes_home / "claude-agents"
+    agents = hermes_home / "codex-agents"
     write(agents, "reviewer.md", "---\nname: reviewer\nmodel: sonnet\nreadonly: true\n---\nMine.")
     write(agents, "broken.md", "---\nname: Broken!\n---\n")
     settings, _ = defaults()
@@ -138,7 +156,7 @@ def test_settings_overrides_and_validation(hermes_home):
     assert "builder" not in roster.agents
     assert any("ghost" in p for p in roster.problems)
     assert any("explorer" in p and "color" in p for p in roster.problems)
-    assert all(spec.provider is None for spec in roster.agents.values())
+    assert all(roster.agents[n].provider is None for n in ("reviewer", "explorer", "researcher"))
 
 
 def test_import_claude_code_agents(hermes_home):
@@ -154,6 +172,36 @@ def test_roster_cache_reloads_when_a_file_changes(hermes_home):
     settings, _ = defaults()
     first = cache.get(settings, hermes_home)
     assert cache.get(settings, hermes_home) is first
-    write(hermes_home / "claude-agents", "tester.md", "---\nname: tester\nmodel: haiku\n---\nTest.")
+    write(hermes_home / "codex-agents", "tester.md", "---\nname: tester\nmodel: haiku\n---\nTest.")
     second = cache.get(settings, hermes_home)
     assert second is not first and "tester" in second.agents
+
+
+def test_codex_defaults_and_builtin_efforts(hermes_home):
+    settings, problems = defaults()
+    assert not problems
+    assert cfg.DEFAULT_PROVIDER == settings["provider"] == "claude-subscription-directsdk-experimental"
+    assert settings["agent_dirs"] == ["{hermes_home}/claude-agents", "{hermes_home}/codex-agents"]
+    roster = cfg.load_roster(settings, hermes_home)
+    assert {name: (spec.model, spec.provider, spec.effort) for name, spec in roster.agents.items()
+            if name.startswith("codex-")} == {
+        "codex-reviewer": ("gpt-6.1-sol-900k", "openai-codex", "high"),
+        "codex-builder": ("gpt-6.1-sol-900k", "openai-codex", "medium"),
+        "codex-explorer": ("gpt-6-luna-900k", "openai-codex", "low"),
+        "codex-researcher": ("gpt-6-luna-900k", "openai-codex", "low")}
+    assert all(roster.agents[n].effort is None for n in ("reviewer", "builder", "explorer", "researcher"))
+
+
+def test_none_reasoning_effort_is_preserved(hermes_home):
+    spec, warnings = cfg.spec_from_markdown("---\nname: x\neffort: none\n---\nBody")
+    assert spec.effort == "none" and not warnings
+    settings, _ = defaults({"overrides": {"reviewer": {"effort": "none"}}})
+    assert cfg.load_roster(settings, hermes_home).agents["reviewer"].effort == "none"
+
+
+def test_codex_folder_overrides_claude_folder(hermes_home):
+    write(hermes_home / "claude-agents", "custom.md", "---\nname: custom\nmodel: sonnet\n---\nClaude")
+    write(hermes_home / "codex-agents", "custom.md", "---\nname: custom\nmodel: gpt-6.1-sol-900k\nprovider: openai-codex\n---\nCodex")
+    settings, _ = defaults()
+    custom = cfg.load_roster(settings, hermes_home).agents["custom"]
+    assert (custom.model, custom.provider, custom.instructions) == ("gpt-6.1-sol-900k", "openai-codex", "Codex")

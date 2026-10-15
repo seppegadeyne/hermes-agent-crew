@@ -24,8 +24,8 @@ CHILD_SESSION = "child-session-1"
 def loaded(hermes_home, monkeypatch):
     plugins_dir = hermes_home / "plugins"
     plugins_dir.mkdir()
-    (plugins_dir / "hermes-claude-agents").symlink_to(PLUGIN_ROOT, target_is_directory=True)
-    (hermes_home / "config.yaml").write_text("plugins:\n  enabled: [hermes-claude-agents]\n", encoding="utf-8")
+    (plugins_dir / "heremes-codex-agents").symlink_to(PLUGIN_ROOT, target_is_directory=True)
+    (hermes_home / "config.yaml").write_text("plugins:\n  enabled: [heremes-codex-agents]\n", encoding="utf-8")
     from hermes_cli import plugins as hermes_plugins
     hermes_plugins._reset_plugin_managers_for_tests()
     manager = hermes_plugins.get_plugin_manager()
@@ -35,12 +35,13 @@ def loaded(hermes_home, monkeypatch):
 
 
 def test_loader_registers_tools_hooks_command_and_prompt(loaded):
-    record = loaded.manager._plugins["hermes-claude-agents"]
+    record = loaded.manager._plugins["heremes-codex-agents"]
     assert not record.error, record.error
     assert {"agents_run", "agents_status"} <= loaded.manager._plugin_tool_names
     for hook in ("pre_tool_call", "subagent_start", "subagent_stop", "transform_tool_result"):
         assert loaded.plugins.has_hook(hook), hook
-    text = loaded.manager._plugin_commands["claude-agents"]["handler"]("")
+    assert "claude-agents" in loaded.manager._plugin_commands
+    text = loaded.manager._plugin_commands["codex-agents"]["handler"]("")
     assert "reviewer (opus" in text and "explorer (haiku" in text and "builder (sonnet" in text
     sections = loaded.plugins.render_system_prompt_sections({"session_id": "s", "model": "sonnet"})
     assert any("agents_run" in section.content for section in sections)
@@ -127,4 +128,4 @@ def test_scouting_nudge_through_the_real_result_hook(loaded):
         out = [_apply_transform_tool_result_hook("read_file", {"path": "x"}, '{"content": "x"}', 1, ids)
                for _ in range(8)]
     assert out[:7] == ['{"content": "x"}'] * 7
-    assert "[hermes-claude-agents] 8 read/search calls" in out[7] and "explorer" in out[7]
+    assert "[heremes-codex-agents] 8 read/search calls" in out[7] and "explorer" in out[7]
