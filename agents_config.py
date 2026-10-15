@@ -1,4 +1,4 @@
-"""Agent roster and settings for hermes-claude-agents.
+"""Agent roster and settings for heremes-codex-agents.
 
 Agents are Markdown files with a small YAML-style frontmatter block, the same shape Claude Code
 uses for ``~/.claude/agents/*.md``::
@@ -40,7 +40,7 @@ PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 TOOL_RE = re.compile(r"^[A-Za-z0-9_*?-]{1,96}$")
 TOOLSET_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
-EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 MAX_DESCRIPTION_CHARS = 300
 MAX_USE_WHEN_CHARS = 200
 MAX_INSTRUCTIONS_CHARS = 12_000
@@ -82,7 +82,7 @@ DEFAULT_PROVIDER = "claude-subscription-directsdk-experimental"
 INHERIT = "inherit"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "agent_dirs": ["{hermes_home}/claude-agents"],
+    "agent_dirs": ["{hermes_home}/claude-agents", "{hermes_home}/codex-agents"],
     "import_claude_code_agents": False,
     "provider": DEFAULT_PROVIDER,
     "overrides": {},
@@ -123,6 +123,7 @@ class AgentSpec:
     effort: str | None = None
     instructions: str = ""
     source: str = "builtin"
+    inherit_provider: bool = False
 
 
 @dataclass
@@ -342,14 +343,15 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
         raise ValueError(f"instructions are longer than {MAX_INSTRUCTIONS_CHARS} characters")
     warnings.extend(f"ignored key {key!r}" for key in meta if key not in KNOWN_KEYS)
     spec = AgentSpec(name=name, description=description, use_when=use_when, model=model, provider=provider,
-                     readonly=readonly, tools=tools, toolsets=toolsets, effort=effort, instructions=body, source=source)
+                     readonly=readonly, tools=tools, toolsets=toolsets, effort=effort, instructions=body, source=source,
+                     inherit_provider=str(meta.get("provider", "")).strip().lower() == INHERIT)
     return spec, warnings
 
 
 # --------------------------------------------------------------------------- settings
 
 def read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any], list[str]]:
-    """Plugin settings (plugins.entries.hermes-claude-agents.settings.*) with validation."""
+    """Plugin settings (plugins.entries.heremes-codex-agents.settings.*) with validation."""
     settings: dict[str, Any] = {}
     problems: list[str] = []
     for key, default in DEFAULT_SETTINGS.items():
@@ -427,6 +429,7 @@ def _apply_overrides(roster: Roster, settings: Mapping[str, Any]) -> None:
                     changes["model"] = _check_model(text)
                 elif key == "provider":
                     changes["provider"] = _check_provider(text)
+                    changes["inherit_provider"] = bool(text and text.lower() == INHERIT)
                 elif key == "effort":
                     changes["effort"] = _check_effort(text)
                 elif key != "enabled":
@@ -438,7 +441,7 @@ def _apply_overrides(roster: Roster, settings: Mapping[str, Any]) -> None:
     default_provider = settings.get("provider") or None
     if default_provider:
         for name, spec in list(roster.agents.items()):
-            if spec.provider is None:
+            if spec.provider is None and not spec.inherit_provider:
                 roster.agents[name] = replace(spec, provider=default_provider)
 
 

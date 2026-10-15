@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = "hermes_claude_agents"
+PACKAGE = "heremes_codex_agents"
 DIRECT = "claude-subscription-directsdk-experimental"
 sys.dont_write_bytecode = True
 
@@ -197,7 +197,7 @@ def plugin():
 
 @pytest.fixture
 def rig(plugin, hermes_home):
-    from hermes_claude_agents.agents_service import AgentsService
+    from heremes_codex_agents.agents_service import AgentsService
 
     clock = Clock()
     host = FakeHost(hermes_home)

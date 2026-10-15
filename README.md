@@ -1,53 +1,66 @@
-# hermes-claude-agents
+# Heremes-Codex-Agents
 
-Named Claude subagents for [Hermes Agent](https://github.com/NousResearch/hermes-agent):
-**Opus reviews, Sonnet builds, Haiku swarms.**
-
-The lead agent picks an agent by name. The operator's Markdown files decide each agent's model,
-its tools and whether it is read-only, so the lead never chooses a model, a provider or a tool
-set itself. Read-only agents are enforced by a `pre_tool_call` guard, not by instructions.
-Children run through Hermes' public subagent lifecycle API: no core patch, no fork of
-`delegate_task`.
-
-## Why
-
-- **Token efficiency.** Scouts read the files and run the searches in their own context; the lead
-  gets one compact report per agent, never a transcript.
-- **Senior review on call.** An Opus reviewer checks a plan before it is locked, looks for the root
-  cause when the same test fails twice, and reviews the diff before work is called done. With
-  `attach_diff` the diff goes into the reviewer's context, not the lead's.
-- **Operator control.** Models, tools and limits live in files and settings that the operator owns.
+Named Claude **and** GPT subagents for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+This extends the original Claude plugin: its four agent names, model aliases,
+provider default, tool permissions and instructions remain intact. Four additional
+`codex-*` agents use Hermes' native ChatGPT OAuth provider.
 
 ## Built-in agents
 
-| Agent | Model | Access | Use it for |
-|---|---|---|---|
-| `reviewer` | opus | read-only | plan checks, repeated failures, done checks (`attach_diff: true`) |
-| `explorer` | haiku | read-only | finding files, symbols, call sites and config; several in parallel |
-| `researcher` | haiku | read-only | library, API and spec documentation, quoted with URLs |
-| `builder` | sonnet | can change files | one scoped, well-specified change plus its tests; one at a time |
+| Agent | Model | Provider | Effort | Access |
+|---|---|---|---|---|
+| `reviewer` | opus | Claude subscription* | unchanged | read-only |
+| `builder` | sonnet | Claude subscription* | unchanged | writer |
+| `explorer` | haiku | Claude subscription* | unchanged | read-only |
+| `researcher` | haiku | Claude subscription* | unchanged | read-only |
+| `codex-reviewer` | gpt-6-sol | openai-codex | high | read-only |
+| `codex-builder` | gpt-6-sol | openai-codex | medium | writer |
+| `codex-explorer` | gpt-6-luna | openai-codex | low | read-only |
+| `codex-researcher` | gpt-6-luna | openai-codex | low | read-only |
 
-The model names are the `opus`, `sonnet` and `haiku` aliases of the
-[Claude subscription provider](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk)
-(`claude-subscription-directsdk-experimental`), the default provider for every agent. Other setups
-change the provider and models in the settings (see [Configuration](#configuration)).
+*The original default is `claude-subscription-directsdk-experimental`, provided by
+[the original Claude subscription provider plugin](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk).
+Keep that provider installed and authenticated, or retain your existing provider/model
+overrides. This extension does not replace Claude authentication.
 
-## Install
+Claude roles continue to use the operator's global provider default unless overridden.
+Codex roles explicitly select `openai-codex`, so adding them does not reroute the original
+roles. Both families share the same run limits, cancellation, read-only enforcement,
+and one-writer default. The lead chooses an agent name, not a model or provider.
 
-```bash
-hermes plugins install seppegadeyne/hermes-claude-agents --enable
-```
+## Install and migrate
 
-Start a new session (or restart the gateway): plugins load at startup. `/claude-agents` lists the
-roster, the agent folders and any problems in agent files.
+1. Use Hermes 0.21.6+ with `plugins.isolation: in_process`. To use both providers in
+   the same session, use a current Hermes build whose lifecycle API supports a
+   per-launch `provider` field. `/claude-agents` reports this capability.
+2. Keep your existing Claude provider setup. To add Codex authentication, run
+   `hermes auth add openai-codex` (optionally `--browser`). The lead can remain Claude.
+   Choose account-visible GPT models; catalog entries do not guarantee entitlement.
+3. Extract this project into `~/.hermes/plugins/heremes-codex-agents` (or your custom
+   `HERMES_HOME/plugins`). Copy the original settings block from
+   `plugins.entries.hermes-claude-agents.settings` to
+   `plugins.entries.heremes-codex-agents.settings`. Settings are not migrated automatically.
+4. Disable the original orchestration plugin with
+   `hermes plugins disable hermes-claude-agents`, then run
+   `hermes plugins enable heremes-codex-agents`. Keep its separate Claude provider enabled.
+5. Restart the session/gateway. Both `/claude-agents` and `/codex-agents` show the full roster.
 
-Requirements:
+The original custom directory `{hermes_home}/claude-agents` loads first, followed by
+`{hermes_home}/codex-agents`; later files with the same name win. If you have a custom
+`agent_dirs` setting, retain it and optionally append the Codex folder. Optional
+`~/.claude/agents` imports and Claude tool-name mapping are unchanged.
 
-- Hermes 0.21.6 or newer (the subagent lifecycle API).
-- In-process plugins, the default `plugins.isolation: in_process`. A launch has to bind to the
-  running agent turn, which the plugin host process cannot see; under host isolation both tools
-  refuse with a clear message.
-- A provider that knows the model names in your agent files.
+The toolset remains `claude_agents` so existing enabled-toolset configurations continue
+to work. Do not enable both orchestration plugins: their tool and command names overlap.
+This adaptation has not been published to GitHub; install from the supplied source.
+
+Hermes handles Codex OAuth and refresh; no Codex CLI or API key is required by the
+Codex roles. Account limits still apply. This plugin does not alter provider fallback,
+auxiliary model or external tool billing settings. Existing Claude billing behavior
+belongs to the configured Claude provider. Review those settings separately.
+
+Older Hermes builds refuse cross-provider launches rather than silently rerouting them.
+Missing per-agent reasoning-effort support is reported in run results.
 
 ## Tools
 
@@ -56,7 +69,7 @@ Requirements:
 ```json
 {
   "tasks": [
-    {"agent": "explorer", "goal": "Find where sessions are persisted and who calls it.",
+    {"agent": "codex-explorer", "goal": "Find where sessions are persisted and who calls it.",
      "context": "Python repo; storage code lives under src/store/.", "workdir": "/srv/app"},
     {"agent": "reviewer", "goal": "Done check of the session-storage change.", "workdir": "/srv/app",
      "attach_diff": true}
@@ -93,8 +106,9 @@ An agent is a Markdown file with a small frontmatter block, the format Claude Co
 ```markdown
 ---
 name: security-reviewer
-description: Read-only security review of a diff (Opus).
-model: opus
+description: Read-only security review of a diff (Sol).
+provider: openai-codex
+model: gpt-6-sol
 readonly: true
 ---
 You review changes for injection, authentication and secret-handling bugs. Cite file:line.
@@ -115,26 +129,27 @@ You review changes for injection, authentication and secret-handling bugs. Cite 
 Claude Code tool names map to Hermes tools: `Read` to `read_file`; `Grep`, `Glob` and `LS` to
 `search_files`; `WebFetch` and `WebSearch` to `web_extract` and `web_search`; `Edit`, `MultiEdit`
 and `NotebookEdit` to `patch`; `Write` to `write_file`; `Bash` to `terminal`. `Task` is dropped
-(agents never start agents) and `color` is ignored, so Claude Code agent files load unchanged. An
+(agents never start agents) and `color` is ignored, so Claude Code tool names remain compatible. Imported Claude model aliases are not translated: override them with GPT model IDs before using Codex. An
 agent limited to read tools is read-only automatically.
 
 Folders, read in this order (a later file with the same name replaces an earlier one):
 
 1. the built-in agents in this plugin;
 2. `~/.claude/agents`, when `import_claude_code_agents` is on;
-3. every folder in `agent_dirs`, by default `{hermes_home}/claude-agents`.
+3. every folder in `agent_dirs`, by default `{hermes_home}/claude-agents` then `{hermes_home}/codex-agents`.
 
 ## Configuration
 
-Settings live under `plugins.entries.hermes-claude-agents.settings` in Hermes' `config.yaml`:
+Settings live under `plugins.entries.heremes-codex-agents.settings` in Hermes' `config.yaml`:
 
 ```yaml
 plugins:
   entries:
-    hermes-claude-agents:
+    heremes-codex-agents:
       settings:
         overrides:
           reviewer: {model: sonnet}
+          codex-reviewer: {model: gpt-6-sol, effort: high}
           builder: {enabled: false}
         max_parallel_writers: 1
 ```
@@ -142,7 +157,7 @@ plugins:
 | Setting | Default | Meaning |
 |---|---|---|
 | `provider` | `claude-subscription-directsdk-experimental` | Provider for agents without their own; `inherit` passes none. |
-| `agent_dirs` | `["{hermes_home}/claude-agents"]` | Extra agent folders. |
+| `agent_dirs` | `["{hermes_home}/claude-agents", "{hermes_home}/codex-agents"]` | Extra agent folders. |
 | `import_claude_code_agents` | `false` | Also load `~/.claude/agents`. |
 | `overrides` | `{}` | Per agent: `model`, `provider`, `effort`, `enabled`. |
 | `max_parallel` | `12` | Tasks per `agents_run` call (1-16). |
@@ -196,6 +211,7 @@ Provider routing depends on the Hermes build:
 ## Development
 
 ```bash
+python3 tests/smoke_check.py  # dependency-free fake-host smoke checks
 python -m pytest -q        # with the Python of a Hermes checkout, or HERMES_SOURCE=/path/to/hermes-agent
 ruff check .
 hermes plugins doctor . --ci
@@ -209,6 +225,16 @@ against the oldest supported Hermes release and against Hermes `main`.
 
 See also [hermes-teammates](https://github.com/100yenadmin/hermes-teammates), asynchronous
 teammates built on the same lifecycle API.
+
+## Provenance
+
+Adapted from [seppegadeyne/hermes-claude-agents](https://github.com/seppegadeyne/hermes-claude-agents),
+commit `0135e9f5098c66d663558c1ff2d2176860b66f37` (v0.4.1).
+Original copyright and MIT license retained.
+
+Authentication and defaults were checked against Hermes' `hermes_cli/codex_models.py`
+and [provider docs](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/integrations/providers.md).
+Automated tests use fake model runs; a live subscription smoke test remains necessary.
 
 ## License
 

@@ -1,3 +1,25 @@
+# Heremes-Codex-Agents changes
+
+## 0.2.0
+
+- Restore original Claude reviewer/builder/explorer/researcher names, models, instructions and provider default.
+- Add four explicit codex-* roles; Claude and Codex can run together on capable Hermes builds.
+- Restore claude_agents toolset, add /claude-agents command alias, and load the original custom folder.
+- Share writer/run limits and guard enforcement across both provider families.
+- Document migration of settings to the new plugin identity.
+
+## 0.1.0
+
+- Default to Hermes native openai-codex ChatGPT subscription authentication.
+- Use Sol for review/build and Luna for exploration/research, with role-specific effort.
+- Rename plugin, toolset, prompt section, command and custom agent directory.
+- Accept none reasoning effort for compatible models.
+- Preserve explicit per-agent provider inheritance instead of reapplying the global default.
+- Preserve upstream lifecycle, read-only guard, no-nesting policy and hardened git diff.
+- Retain optional Claude Code file imports; model IDs require manual migration.
+
+## Upstream history
+
 # Changelog
 
 ## 0.4.1 (2026-10-14)

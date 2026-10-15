@@ -41,7 +41,7 @@ class ChildPolicy:
     def decide(self, tool_name: str) -> str | None:
         """Block message for a tool call, or None to let it through."""
         if tool_name in OWN_TOOLS:
-            return (f"hermes-claude-agents: agent '{self.agent}' cannot start other agents. "
+            return (f"heremes-codex-agents: agent '{self.agent}' cannot start other agents. "
                     "Finish the task yourself and report back.")
         if self.allowed is None or tool_name in CATALOG_TOOLS:
             return None
@@ -51,13 +51,13 @@ class ChildPolicy:
         if tool_name == "tool_call":
             # Hermes unwraps a valid single tool_call before this check and checks the real tool; what lands
             # here is a connector batch, an out-of-scope tool or arguments that failed the schema probe.
-            return (f"hermes-claude-agents: this tool_call was blocked for agent '{self.agent}': it is a batch, or "
+            return (f"heremes-codex-agents: this tool_call was blocked for agent '{self.agent}': it is a batch, or "
                     "it did not resolve to a tool this agent may use. Send one entry per tool_call, with the exact "
                     f"name and arguments from tool_describe. Usable tools: {usable}.")
         if self.readonly:
-            return (f"hermes-claude-agents: agent '{self.agent}' is read-only, so '{tool_name}' is blocked. "
+            return (f"heremes-codex-agents: agent '{self.agent}' is read-only, so '{tool_name}' is blocked. "
                     f"Usable tools: {usable}. Investigate and report instead of changing anything.")
-        return (f"hermes-claude-agents: agent '{self.agent}' may only use its configured tools, so "
+        return (f"heremes-codex-agents: agent '{self.agent}' may only use its configured tools, so "
                 f"'{tool_name}' is blocked. Usable tools: {usable}.")
 
 

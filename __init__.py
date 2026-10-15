@@ -1,6 +1,7 @@
-"""hermes-claude-agents: named Claude subagents for Hermes.
+"""heremes-codex-agents: named Claude and GPT subagents for Hermes.
 
-Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format);
+Claude roles stay intact; explicit Codex roles add Sol and Luna.
+Agents are Markdown files (the Claude Code agent format);
 the lead model picks an agent by name, the operator's files decide model, tools and read-only status.
 Children run through Hermes' public subagent lifecycle API; no core patch.
 """
@@ -11,7 +12,7 @@ from .agents_config import Roster
 from .agents_host import HermesHost
 from .agents_service import AgentsService, tool_description
 
-PROMPT_SECTION_ID = "claude-agents.guide"
+PROMPT_SECTION_ID = "codex-agents.guide"
 
 
 def register(ctx):
@@ -37,7 +38,8 @@ def register(ctx):
         try:
             return service.roster_text()
         except Exception as exc:
-            return f"hermes-claude-agents: {str(exc)[:500]}"
+            return f"heremes-codex-agents: {str(exc)[:500]}"
 
-    ctx.register_command("claude-agents", handler=command, description="List the Claude agents and their models")
+    for name in ("claude-agents", "codex-agents"):
+        ctx.register_command(name, handler=command, description="List Claude and Codex agents and their models")
     return service

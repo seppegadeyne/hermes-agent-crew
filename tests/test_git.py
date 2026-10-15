@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from hermes_claude_agents import agents_git
+from heremes_codex_agents import agents_git
 
 
 @pytest.fixture(autouse=True)
