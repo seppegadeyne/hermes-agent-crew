@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import os
 import shlex
 import threading
 import time
@@ -26,7 +27,7 @@ from typing import Any
 
 from . import agents_git
 from .agents_config import INT_RANGES, AgentSpec, Roster, RosterCache, read_settings
-from .agents_policy import ChildPolicy, PolicyRegistry
+from .agents_policy import ChildPolicy, PolicyRegistry, scope_path, scopes_overlap
 
 PLUGIN_ID = "hermes-claude-agents"
 MAX_GOAL_CHARS = 12_000
@@ -45,9 +46,15 @@ STOP_STATUS = {"completed": "succeeded", "interrupted": "interrupted", "cancelle
 SCOUT_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract"})
 # Shell programs that only read or filter. A terminal command counts as scouting when every segment
 # (split on &&, ||, ; and |) runs one of these and nothing writes a file.
+# echo and printf only print here: a segment that redirects into a file is refused before this list is used.
 READ_PROGRAMS = frozenset({"cat", "grep", "egrep", "fgrep", "rg", "head", "tail", "ls", "wc", "tree", "find", "sed",
-                           "git", "sort", "uniq", "cut", "tr", "nl", "column", "stat", "file", "du", "jq"})
-GIT_READ_COMMANDS = frozenset({"log", "show", "diff", "status", "grep", "blame", "ls-files", "branch"})
+                           "git", "sort", "uniq", "cut", "tr", "nl", "column", "stat", "file", "du", "jq", "echo",
+                           "printf", "pwd", "which", "realpath", "readlink", "basename", "dirname", "diff", "cmp",
+                           "md5sum", "sha1sum", "sha256sum", "true"})
+GIT_READ_COMMANDS = frozenset({"log", "show", "diff", "status", "grep", "blame", "ls-files", "branch", "rev-parse",
+                               "describe", "ls-tree", "cat-file", "shortlog"})
+# Allowed in a read command, but on their own they are not a lookup (`echo ---` separators, `pwd`).
+PRINT_ONLY = frozenset({"echo", "printf", "pwd", "true"})
 FIND_WRITE_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf",
                                 "-fls"})
 _SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
@@ -99,6 +106,7 @@ class Run:
     owner_session_id: str
     goal: str
     readonly: bool
+    write_scope: tuple = ()
     owner_ref: Callable[[], Any] | None = None
     model: str | None = None
     provider: str | None = None
@@ -133,6 +141,7 @@ class AgentsService:
         self.cache = RosterCache()
         self.policies = PolicyRegistry()
         self._lock = threading.RLock()
+        self._admit = threading.Lock()  # serializes agents_run admission + launch
         self._runs: OrderedDict[str, Run] = OrderedDict()
         self._by_child_session: dict[str, str] = {}
         self._intent: contextvars.ContextVar = contextvars.ContextVar("hermes_claude_agents_intent", default=None)
@@ -171,7 +180,7 @@ class AgentsService:
                             "duration_ms": duration_ms if isinstance(duration_ms, (int, float)) else None}
         return None
 
-    def pre_tool_call(self, tool_name: Any = "", task_id: Any = "", **_: Any) -> dict | None:
+    def pre_tool_call(self, tool_name: Any = "", task_id: Any = "", args: Any = None, **_: Any) -> dict | None:
         # Hermes blocks EVERY tool call when a pre_tool_call callback raises or hangs, so this stays a
         # total, constant-time function that only speaks for children this plugin launched. For those
         # children an internal error blocks (fail closed); every other call passes untouched.
@@ -184,7 +193,7 @@ class AgentsService:
         if policy is None:
             return None
         try:
-            message = policy.decide(str(tool_name or ""))
+            message = policy.decide(str(tool_name or ""), args)
         except Exception:
             message = f"hermes-claude-agents: the tool policy check for agent '{policy.agent}' failed; blocked."
         return {"action": "block", "message": message} if message else None
@@ -268,25 +277,56 @@ class AgentsService:
         session_id = str(session_id or getattr(parent, "session_id", "") or "")
         settings, problems, roster = self.config()
         tasks = self._parse_tasks(args, settings, roster)
-        with self._lock:
-            mine = [r for r in self._runs.values() if self._owns(r, session_id, parent) and r.status == "running"]
-        writers = sum(1 for spec, _ in tasks if not spec.readonly)
-        live_writers = sum(1 for r in mine if not r.readonly)
-        if writers and writers + live_writers > settings["max_parallel_writers"]:
-            raise Refusal("too_many_writers",
-                          f"{writers} agent(s) in this call can change files and {live_writers} such run(s) are "
-                          f"still in progress; at most {settings['max_parallel_writers']} may run at once so they "
-                          "do not edit the same tree in parallel. Run writers one at a time.")
-        if len(mine) + len(tasks) > settings["max_live_runs"]:
-            raise Refusal("too_many_live_runs",
-                          f"This conversation already has {len(mine)} agent run(s) in progress (limit "
-                          f"{settings['max_live_runs']}). Collect them with agents_status first.")
         features = self.features()
         parent_provider = str(getattr(parent, "provider", "") or "")
-        runs = [self._launch(spec, task, parent, parent_provider, session_id, settings, features)
-                for spec, task in tasks]
+        # Admission and launch are one step: two agents_run calls at the same time must not both pass the
+        # writer and live-run checks before either has tracked its runs. Launching only starts threads.
+        with self._admit:
+            with self._lock:
+                mine = [r for r in self._runs.values()
+                        if self._owns(r, session_id, parent) and r.status == "running"]
+            self._check_writers([(spec, task) for spec, task in tasks if not spec.readonly],
+                                [r for r in mine if not r.readonly], settings)
+            if len(mine) + len(tasks) > settings["max_live_runs"]:
+                raise Refusal("too_many_live_runs",
+                              f"This conversation already has {len(mine)} agent run(s) in progress (limit "
+                              f"{settings['max_live_runs']}). Collect them with agents_status first.")
+            runs = [self._launch(spec, task, parent, parent_provider, session_id, settings, features)
+                    for spec, task in tasks]
         early = self._wait(runs, started + self._wait_budget(args.get("wait_seconds"), settings))
         return self._report(runs, settings, problems, roster, early)
+
+    @staticmethod
+    def _check_writers(new: list, live: list, settings: dict) -> None:
+        """Unscoped writers run one at a time (max_parallel_writers); writers with disjoint write scopes may
+        run side by side, because the guard keeps each one's file edits inside its own scope."""
+        if not new:
+            return
+        limit = settings["max_parallel_writers"]
+        if limit == 0:
+            raise Refusal("writers_disabled", "The operator turned off agents that change files "
+                                              "(max_parallel_writers: 0). Make the change yourself.")
+        scoped = [task["write_scope"] for _, task in new if task["write_scope"]] + \
+                 [run.write_scope for run in live if run.write_scope]
+        unscoped = sum(1 for _, task in new if not task["write_scope"]) + \
+            sum(1 for run in live if not run.write_scope)
+        if unscoped:
+            total = len(new) + len(live)
+            if total > limit:
+                raise Refusal("too_many_writers",
+                              f"{len(new)} agent(s) in this call can change files and {len(live)} such run(s) are "
+                              f"still in progress; at most {limit} may run at once when one of them has no "
+                              "write_scope, so they do not edit the same tree in parallel. Nothing was started. "
+                              "Give every writer a write_scope (the files or folders it may change, disjoint "
+                              "per writer) to run them in parallel, or run them one at a time.")
+            return
+        for i, a in enumerate(scoped):
+            for b in scoped[i + 1:]:
+                if scopes_overlap(a, b):
+                    raise Refusal("overlapping_write_scopes",
+                                  f"Write scopes overlap ({', '.join(a)} / {', '.join(b)}); writers that run at the "
+                                  "same time need disjoint scopes. Nothing was started. Narrow the scopes, or run "
+                                  "these writers one after the other.")
 
     def _status(self, args: Any, session_id: str | None) -> dict:
         started = self.clock()
@@ -348,9 +388,11 @@ class AgentsService:
             except ValueError:
                 raise Refusal("invalid_arguments", "tasks must be a list of task objects.") from None
         if raw is None and args.get("agent"):
-            raw = [{key: args.get(key) for key in ("agent", "goal", "context", "attach_diff", "diff_base", "workdir")}]
+            keys = ("agent", "goal", "context", "attach_diff", "diff_base", "workdir", "write_scope")
+            raw = [{key: args.get(key) for key in keys}]
         if not isinstance(raw, list) or not raw:
-            raise Refusal("invalid_arguments", "Pass tasks: [{agent, goal, context?, workdir?, attach_diff?}].")
+            raise Refusal("invalid_arguments",
+                          "Pass tasks: [{agent, goal, context?, workdir?, write_scope?, attach_diff?}].")
         if len(raw) > settings["max_parallel"]:
             raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call; nothing was started. "
                                             "Send the rest in a second agents_run call, or merge related tasks.")
@@ -377,14 +419,37 @@ class AgentsService:
             if base not in (None, "") and not agents_git.valid_ref(base):
                 raise Refusal("invalid_diff_base", f"{where}: diff_base {base!r} is not a git ref.")
             attach = item.get("attach_diff")
+            workdir = self._workdir(item.get("workdir"), where)
+            write_scope = self._write_scope(item.get("write_scope"), workdir or self.host.cwd(), spec, where)
             tasks.append((spec, {
                 "goal": goal.strip(),
                 "context": (context or "").strip(),
                 "attach_diff": attach is True or (isinstance(attach, str) and attach.strip().lower() == "true"),
                 "diff_base": base.strip() if isinstance(base, str) and base.strip() else None,
-                "workdir": self._workdir(item.get("workdir"), where),
+                "workdir": workdir,
+                "write_scope": write_scope,
             }))
         return tasks
+
+    @staticmethod
+    def _write_scope(raw: Any, base: Path, spec: AgentSpec, where: str) -> tuple:
+        """Normalized absolute paths a writer may change (relative ones resolve against its workdir)."""
+        if raw is None or raw == "" or raw == []:
+            return ()
+        if spec.readonly:
+            raise Refusal("invalid_write_scope", f"{where}: agent '{spec.name}' is read-only; write_scope is only "
+                                                 "for agents that change files.")
+        items = [raw] if isinstance(raw, str) else raw
+        if not isinstance(items, list) or not items or len(items) > 32 \
+                or not all(isinstance(p, str) and p.strip() for p in items):
+            raise Refusal("invalid_write_scope", f"{where}: write_scope must be a path or a list of paths.")
+        scopes = []
+        for item in items:
+            path = scope_path(item, str(base))
+            if path is None or path == os.sep:
+                raise Refusal("invalid_write_scope", f"{where}: write_scope {item!r} is not a usable path.")
+            scopes.append(os.path.realpath(path))
+        return tuple(dict.fromkeys(scopes))
 
     @staticmethod
     def _workdir(raw: Any, where: str) -> Path | None:
@@ -400,8 +465,8 @@ class AgentsService:
     def _launch(self, spec: AgentSpec, task: dict, parent: Any, parent_provider: str, session_id: str,
                 settings: dict, features: dict) -> Run:
         run = Run(run_id="ag_" + uuid.uuid4().hex[:10], agent=spec.name, owner_session_id=session_id,
-                  goal=task["goal"], readonly=spec.readonly, owner_ref=_weak(parent), model=spec.model,
-                  started_at=self.wall())
+                  goal=task["goal"], readonly=spec.readonly, write_scope=task.get("write_scope", ()),
+                  owner_ref=_weak(parent), model=spec.model, started_at=self.wall())
         self._track(run)
         kwargs: dict[str, Any] = dict(
             goal=task["goal"], context=self._compose_context(spec, task, settings), role="leaf", model=spec.model,
@@ -434,7 +499,7 @@ class AgentsService:
         # list), so a build that refuses those toolsets gets one retry without them. Narrowing from an
         # explicit `toolsets:` key is the only restriction an unguarded agent has: no retry there.
         retry_without_toolsets = "allowed_toolsets" in kwargs and not spec.toolsets and spec.tools is not None
-        intent = _Intent(ChildPolicy.for_spec(spec))
+        intent = _Intent(ChildPolicy.for_spec(spec, task.get("write_scope", ())))
         token = self._intent.set(intent)
         try:
             try:
@@ -474,6 +539,11 @@ class AgentsService:
         if spec.readonly:
             rules.append("- You are read-only. Tools that change files, run commands or start other agents are "
                          "blocked: investigate and report instead.")
+        if task.get("write_scope"):
+            rules.append("- Your write scope: " + ", ".join(task["write_scope"]) + ". Change files only there, "
+                         "and always pass ABSOLUTE paths to write_file and patch (relative paths are blocked). "
+                         "Edits outside the scope are blocked, and other agents may be editing the rest of the tree "
+                         "right now. Do not use shell commands to write outside it either.")
         elif spec.tools is not None:
             rules.append("- Only your configured tools work; other tool calls are blocked.")
         rules.append("- Finish with ONE compact report for the lead: findings first (with file:line where it "
@@ -766,7 +836,7 @@ def is_read_command(command: str) -> bool:
             continue
         if not _reads_only(words):
             return False
-        reads += 1
+        reads += words[0].rsplit("/", 1)[-1] not in PRINT_ONLY
     return reads > 0
 
 
@@ -886,6 +956,8 @@ _PROMPT_TAIL = [
     "read it all yourself.",
     "- Background work: a builder or a long review can run with wait_seconds 0 while you do your own part; "
     "collect it later with agents_status.",
+    "- Parallel builders: give each writer a write_scope (the files or folders it may change, disjoint per "
+    "writer) and they run side by side; without one, writers run one at a time.",
     "- Senior review on call: ask the reviewer (1) before you lock a multi-file plan, (2) when the same test or "
     "build error fails twice, (3) before you call non-trivial work done; pass attach_diff: true so it reads "
     "the diff itself.",

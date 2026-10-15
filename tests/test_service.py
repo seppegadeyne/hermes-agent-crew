@@ -174,6 +174,81 @@ def test_limits(rig):
     assert run(rig, [{"agent": "explorer", "goal": "one too many"}])["error"] == "too_many_live_runs"
 
 
+def test_scoped_writers_run_in_parallel_and_stay_in_scope(rig, tmp_path):
+    repo = tmp_path / "site"
+    (repo / "content").mkdir(parents=True)
+    rig.host.repo = repo
+    three = [{"agent": "builder", "goal": f"write {n}", "write_scope": [f"content/{n}.json"]}
+             for n in ("huid", "cosmetisch", "wellness")]
+    out = run(rig, three, wait_seconds=0)
+    assert out["ok"] and len(rig.lifecycle.requests) == 3
+    assert "Your write scope: " + str(repo / "content" / "huid.json") in rig.lifecycle.requests[0].context
+    sid = "sa-0-00000000"
+    huid, wellness = str(repo / "content" / "huid.json"), str(repo / "content" / "wellness.json")
+    assert rig.service.pre_tool_call(tool_name="write_file", task_id=sid, args={"path": huid}) is None
+    # Hermes resolves relative and ~ paths against the child's own cwd and home: never trusted for a scope.
+    for raw in ("content/huid.json", "~/huid.json", "./content/huid.json"):
+        blocked = rig.service.pre_tool_call(tool_name="write_file", task_id=sid, args={"path": raw})
+        assert blocked["action"] == "block" and "absolute paths" in blocked["message"], raw
+    for args in ({"path": wellness}, {"path": huid + "/../wellness.json"}, {"path": "/etc/passwd"}, {},
+                 {"mode": "patch", "patch": f"*** Begin Patch\n*** Update File: {huid}\n*** Delete File: "
+                                            f"{repo / 'content' / 'cosmetisch.json'}\n"},
+                 {"mode": "patch", "patch": f"*** Begin Patch\n*** Move File: {huid} -> {wellness}\n"},
+                 {"mode": "patch", "patch": "no headers here"}):
+        blocked = rig.service.pre_tool_call(tool_name="patch" if "mode" in args else "write_file", task_id=sid,
+                                            args=args)
+        assert blocked and blocked["action"] == "block" and "write scope" in blocked["message"], args
+    v4a = f"*** Begin Patch\n*** Update File: {huid}\n@@ x @@\n-a\n+b\n*** End Patch"
+    assert rig.service.pre_tool_call(tool_name="patch", task_id=sid, args={"mode": "patch", "patch": v4a}) is None
+    # A symlink inside the scope that leads out of it is outside the scope.
+    (repo / "content" / "huid.json").symlink_to(tmp_path / "elsewhere.json")
+    assert rig.service.pre_tool_call(tool_name="write_file", task_id=sid, args={"path": huid})["action"] == "block"
+    # Reads are not scoped; an overlapping or unscoped writer still has to wait.
+    assert rig.service.pre_tool_call(tool_name="read_file", task_id=sid, args={"path": "/etc/hosts"}) is None
+    overlap = run(rig, [{"agent": "builder", "goal": "x", "write_scope": ["content"]}])
+    assert overlap["error"] == "overlapping_write_scopes" and "Nothing was started" in overlap["message"]
+    unscoped = run(rig, [{"agent": "builder", "goal": "x"}])
+    assert unscoped["error"] == "too_many_writers" and "write_scope" in unscoped["message"]
+    assert run(rig, [{"agent": "builder", "goal": "x", "write_scope": "theme/"}], wait_seconds=0)["ok"]
+    assert len(rig.lifecycle.requests) == 4
+
+
+def test_concurrent_calls_cannot_both_pass_the_writer_check(rig):
+    import threading
+    gate, results = threading.Event(), []
+    original = rig.lifecycle.launch
+
+    def slow_launch(request):
+        gate.wait(2)  # hold the first call inside launch while a second call arrives
+        return original(request)
+
+    rig.lifecycle.launch = slow_launch
+    first = threading.Thread(target=lambda: results.append(run(rig, [{"agent": "builder", "goal": "a"}],
+                                                                wait_seconds=0)))
+    first.start()
+    second = threading.Thread(target=lambda: results.append(run(rig, [{"agent": "builder", "goal": "b"}],
+                                                                 wait_seconds=0)))
+    second.start()
+    gate.set()
+    first.join(5)
+    second.join(5)
+    assert sorted(bool(r.get("ok")) for r in results) == [False, True]
+    assert len(rig.lifecycle.requests) == 1
+
+
+def test_write_scope_refusals(rig, tmp_path):
+    rig.host.repo = tmp_path
+    assert run(rig, [{"agent": "explorer", "goal": "x", "write_scope": ["a"]}])["error"] == "invalid_write_scope"
+    for bad in ([1], [""], "/", {"a": 1}):
+        assert run(rig, [{"agent": "builder", "goal": "x", "write_scope": bad}])["error"] == "invalid_write_scope"
+    twins = [{"agent": "builder", "goal": "a", "write_scope": ["src"]},
+             {"agent": "builder", "goal": "b", "write_scope": ["src/x.py"]}]
+    assert run(rig, twins)["error"] == "overlapping_write_scopes"
+    rig.host.settings = {"max_parallel_writers": 0}
+    assert run(rig, [{"agent": "builder", "goal": "x", "write_scope": ["a"]}])["error"] == "writers_disabled"
+    assert rig.lifecycle.requests == []
+
+
 def test_refusals(rig):
     assert run(rig, [{"agent": "ghost", "goal": "x"}])["error"] == "unknown_agent"
     assert run(rig, [{"agent": "explorer", "goal": " "}])["error"] == "invalid_goal"
@@ -455,14 +530,16 @@ def test_scouting_commands():
     reads = ("grep -rn foo src 2>/dev/null", "cd /r && git log --oneline -5 2>&1", "sed -n 1,40p a.py",
              "find . -name '*.py' | head", "ls -la; wc -l *.py", "grep -n 'cp' a.py", "grep 'a>b' notes.md",
              "grep -n \"rm -rf\" deploy.sh", "git -C /r diff --stat", "git branch -a", "cat a.py | sort | uniq -c",
-             "jq .name package.json", "grep x < input.txt", "rg foo &>/dev/null")
+             "jq .name package.json", "grep x < input.txt", "rg foo &>/dev/null",
+             "cat a.yml; echo ---; cat b.sh", "git rev-parse --short HEAD && pwd", "which ruff; readlink -f x")
     for command in reads:
         assert is_read_command(command), command
     writes = ("cat > notes.txt", "find . -name x -delete", "sed -n 1p -i a.py", "sed -i -n 1p a.py",
               "grep -l x | xargs rm", "ls; rm x", "python -m pytest -q", "git commit -m x", "echo hi",
               "find . -fprint out.txt", "git log --output=log.txt", "git branch feature-x", "sort -o out a",
               "cat a | tee b", "ls $(rm x)", "ls `rm x`", "cat 'unbalanced", "cd /r", "grep x a >> b",
-              "ls &> out.txt", "git -c core.pager=x log", "ls\nrm x")
+              "ls &> out.txt", "git -c core.pager=x log", "ls\nrm x", "echo --- ; pwd", "echo x > a.txt",
+              "printf '%s' x >> log", "cat a; echo x | tee b")
     for command in writes:
         assert not is_read_command(command), command
 

@@ -1,5 +1,5 @@
 name: hermes-claude-agents
-version: 0.4.1
+version: 0.5.0
 description: "Named Claude subagents for Hermes: Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format) with a fixed model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone
@@ -44,7 +44,7 @@ config_schema:
     type: int
     default: 1
     label: Parallel writers
-    description: Most agents that can change files running at once (0-8). Read-only agents do not count.
+    description: Most agents that can change files running at once while one of them has no write_scope (0-8). Writers that all have disjoint write scopes run side by side; read-only agents never count; 0 turns writers off.
   wait_seconds:
     type: int
     default: 600

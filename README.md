@@ -25,7 +25,7 @@ Children run through Hermes' public subagent lifecycle API: no core patch, no fo
 | `reviewer` | opus | read-only | plan checks, repeated failures, done checks (`attach_diff: true`) |
 | `explorer` | haiku | read-only | finding files, symbols, call sites and config; several in parallel |
 | `researcher` | haiku | read-only | library, API and spec documentation, quoted with URLs |
-| `builder` | sonnet | can change files | one scoped, well-specified change plus its tests; one at a time |
+| `builder` | sonnet | can change files | one scoped, well-specified change plus its tests; parallel with disjoint `write_scope` |
 
 The model names are the `opus`, `sonnet` and `haiku` aliases of the
 [Claude subscription provider](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk)
@@ -147,7 +147,7 @@ plugins:
 | `overrides` | `{}` | Per agent: `model`, `provider`, `effort`, `enabled`. |
 | `max_parallel` | `12` | Tasks per `agents_run` call (1-16). |
 | `max_live_runs` | `24` | Runs in progress per conversation (1-32). |
-| `max_parallel_writers` | `1` | Agents that can change files running at once (0-8). |
+| `max_parallel_writers` | `1` | Agents that can change files running at once while one of them has no `write_scope` (0-8). Writers that all have disjoint scopes run side by side; `0` turns writers off. |
 | `wait_seconds` | `600` | Default wait, always capped below the tool deadline. |
 | `diff_max_chars` | `20000` | Largest diff attached with `attach_diff`. |
 | `summary_max_chars` | `12000` | Longest report returned per run. |
@@ -181,6 +181,29 @@ Provider routing depends on the Hermes build:
 - `attach_diff` runs git without a shell and with every program a repository can configure
   disabled: clean and smudge filters, textconv, external diff drivers, fsmonitor, hooks and the
   pager. Submodules are skipped.
+
+## Parallel writers
+
+Give each writer a `write_scope`: the files or folders it may change, relative to its `workdir` or
+absolute. Writers whose scopes do not overlap run in parallel; an unscoped writer still runs alone.
+
+```json
+{"tasks": [
+  {"agent": "builder", "goal": "...", "workdir": "/abs/site", "write_scope": ["content/a.json"]},
+  {"agent": "builder", "goal": "...", "workdir": "/abs/site", "write_scope": ["content/b.json"]}
+]}
+```
+
+The guard checks the target of every `write_file` and `patch` call (including every file in a V4A
+patch, after resolving symlinks) against the scope and blocks the call when it falls outside. A
+scoped writer must use absolute paths: Hermes resolves relative and `~` paths against the child's
+own cwd and the profile home, which the guard cannot see, so those are blocked with a retry hint.
+Overlapping scopes are refused before anything starts.
+
+Limits: shell commands are not path-checked, so a scope keeps the file tools of parallel writers
+apart but is not a sandbox. Scopes are host paths and only meaningful with the local terminal
+backend (with docker or SSH the check fails closed). Another plugin that rewrites tool arguments
+in its own `pre_tool_call` could change a path after this check.
 
 ## Limits and differences from `delegate_task`
 

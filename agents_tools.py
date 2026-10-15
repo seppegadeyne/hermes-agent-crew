@@ -23,6 +23,11 @@ _TASK = {
         "workdir": {"type": "string",
                     "description": "Absolute path of the folder the work is in (a repository root, usually). "
                                    "Defaults to this session's working directory; attach_diff reads git there."},
+        "write_scope": {"type": "array", "items": {"type": "string"},
+                        "description": "For agents that change files: the files or folders this agent may change "
+                                       "(relative to workdir or absolute). write_file and patch outside it are "
+                                       "blocked. Writers with disjoint scopes run in parallel; without a scope, "
+                                       "writers run one at a time."},
         "attach_diff": {"type": "boolean",
                         "description": "Attach the working tree's git status, stat and diff to the agent's context "
                                        "(for reviews; keeps the diff out of your own context)."},

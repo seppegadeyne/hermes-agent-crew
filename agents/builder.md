@@ -1,6 +1,6 @@
 ---
 name: builder
-description: Implementer (Sonnet). Makes a scoped, well-specified code change and runs the relevant tests. Give it the exact files, the intended behaviour and the test command. One writer at a time.
+description: Implementer (Sonnet). Makes a scoped, well-specified code change and runs the relevant tests. Give it the exact files, the intended behaviour and the test command. Builders with disjoint write_scope run in parallel.
 use_when: one scoped, already designed code change plus its tests needs doing
 model: sonnet
 ---

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0 (2026-10-15)
+
+Findings from a day of live sessions (one Opus lead, about 15 conversations): the lead's only
+agents_run call asked for three Sonnet builders, each writing its own JSON file. The one-writer
+limit refused it, and the lead fell back to `delegate_task`, which ran the three on Opus (its
+`delegation.model`) for about 6 USD and 10 minutes. The scouting nudge fired twice all day; most hand reads were
+`cat a; echo ---; cat b` chains that did not count as reading.
+
+- `write_scope` per task: the files or folders a writer may change. Writers with disjoint scopes
+  run in parallel; `max_parallel_writers` applies while any writer has no scope. The guard checks
+  the target of every `write_file` and `patch` call (every file of a V4A patch, symlinks
+  resolved) against the scope; scoped writers must use absolute paths, because Hermes resolves
+  relative and `~` paths against the child's own cwd and home. Admission and launch of an
+  `agents_run` call are now one locked step, so two calls at the same time cannot both pass the
+  writer checks. Overlapping scopes are refused before anything starts, and the
+  refusal for unscoped writers says how to run them in parallel. `max_parallel_writers: 0` turns
+  writers off with its own `writers_disabled` refusal.
+- The `pre_tool_call` guard now receives the call's arguments (documented hook kwarg `args`).
+- Read-only shell detection also accepts `echo`, `printf`, `pwd`, `which`, `realpath`, `readlink`,
+  `basename`, `dirname`, `diff`, `cmp`, checksums and `git rev-parse/describe/ls-tree/cat-file/
+  shortlog`. Print-only segments (`echo ---`, `pwd`) do not count as a lookup on their own, and a
+  redirect into a file still disqualifies the command.
+- The prompt guide has a "Parallel builders" line; the builder's description says it runs in
+  parallel with disjoint scopes.
+
 ## 0.4.1 (2026-10-14)
 
 - The scouting nudge skips every failed result: Hermes' own `status`, and JSON results with a
