@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0 (2026-10-14)
+
+Agents display like `delegate_task` children in Hermes Desktop and the TUI (#1). Both halves
+are feature-detected, so the plugin keeps working on older Hermes builds with the old display.
+
+- `agents_run` is registered with `ui_card="delegate"` on a Hermes build whose `register_tool`
+  takes it (NousResearch/hermes-agent#138735). The call then renders as the
+  delegation card, one row per agent with its goal, model and live activity, and the card stays
+  visible with `display.tool_progress: off`.
+- On a build with `subagent_lifecycle.launch_batch`, a call with several agents launches them as
+  ONE delegation: Hermes mints the batch id and the task numbers, so the Agents panel groups them
+  like a multi-task `delegate_task` call and each agent gets a live transcript in the composer.
+  Hermes validates and routes every request before it builds a child, so a batch rejected there
+  starts nothing and every agent then launches on its own with the usual per-agent retry and
+  error (the run's `note` says why). Single-agent calls and older builds launch one by one as
+  before.
+- Per-child policies bind from the batch's `subagent_start` hooks, matched by goal and else in
+  order; the read-only guard is live before any child's first tool call, as before.
+
 ## 0.4.1 (2026-10-14)
 
 - The scouting nudge skips every failed result: Hermes' own `status`, and JSON results with a

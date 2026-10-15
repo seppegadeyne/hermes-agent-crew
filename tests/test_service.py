@@ -32,6 +32,87 @@ def test_parallel_swarm_returns_compact_reports(rig):
     assert out["results"][2]["readonly"] is True and out["results"][2]["api_calls"] == 3
 
 
+def test_several_agents_launch_as_one_batch(rig):
+    """With launch_batch on the host, a multi-agent call is ONE delegation; policies still bind per child."""
+    finish_on_sleep(rig)
+    finish_on_sleep(rig, index=1)
+    out = run(rig, [{"agent": "explorer", "goal": "find the router"},
+                    {"agent": "builder", "goal": "fix it"}])
+    assert out["ok"] and [r["status"] for r in out["results"]] == ["succeeded"] * 2
+    assert len(rig.lifecycle.batches) == 1 and [r.goal for r in rig.lifecycle.batches[0]] == ["find the router", "fix it"]
+    # subagent_start fired per child inside launch_batch and bound each child's own policy in order.
+    assert rig.lifecycle.checks_during_launch[0] is not None  # explorer is read-only: write blocked
+    assert rig.lifecycle.checks_during_launch[1] is None  # builder may write
+    runs = [rig.service._runs[r["run_id"]] for r in out["results"]]
+    assert [r.subagent_id for r in runs] == ["sa-0-00000000", "sa-0-00000001"]
+    assert [r.child_session_id for r in runs] == ["child-sa-0-00000000", "child-sa-0-00000001"]
+
+
+def test_single_agent_and_old_hosts_launch_one_by_one(rig):
+    finish_on_sleep(rig)
+    run(rig, [{"agent": "explorer", "goal": "solo"}])
+    assert rig.lifecycle.batches == [] and len(rig.lifecycle.requests) == 1
+    rig.lifecycle.launch_batch = None  # a Hermes build without the batch API
+    finish_on_sleep(rig, index=1)
+    finish_on_sleep(rig, index=2)
+    out = run(rig, [{"agent": "explorer", "goal": "a"}, {"agent": "researcher", "goal": "b"}])
+    assert [r["status"] for r in out["results"]] == ["succeeded"] * 2
+    assert rig.lifecycle.batches == [] and len(rig.lifecycle.requests) == 3
+
+
+def test_rejected_batch_falls_back_to_single_launches(rig):
+    """A batch rejected at validation started nothing, so each run launches on its own and keeps its own
+    toolsets retry and its own error."""
+    rig.lifecycle.raise_on_batch = ValueError("Unknown toolsets: ['file']")
+    launches = []
+
+    def refuse_narrowed_once(request):
+        launches.append(request)
+        if getattr(request, "allowed_toolsets", None) and len(launches) == 1:
+            raise ValueError("Unknown toolsets: ['file']")
+        return rig.lifecycle._start(request)
+
+    rig.lifecycle.launch = refuse_narrowed_once
+    finish_on_sleep(rig)
+    finish_on_sleep(rig, index=1)
+    out = run(rig, [{"agent": "explorer", "goal": "a"}, {"agent": "researcher", "goal": "b"}])
+    assert [r["status"] for r in out["results"]] == ["succeeded"] * 2
+    assert rig.lifecycle.batches == [] and len(rig.lifecycle.requests) == 2 and len(launches) == 3
+    assert out["results"][0]["note"] == "toolsets_not_narrowed"  # the first run got its own retry
+    assert rig.service._runs[out["results"][1]["run_id"]].note.startswith("batch_refused: ValueError")
+    assert all(rig.service._runs[r["run_id"]].subagent_id for r in out["results"])
+
+
+def test_batch_handles_bind_by_run_id_and_never_relaunch(rig):
+    """Handles mean the children are running: a run the host left out fails instead of launching again."""
+    real_batch = rig.lifecycle.launch_batch
+
+    def drop_first(requests):
+        handles = real_batch(requests)
+        return [handles[1]]  # the host lost the first child's handle; the second child's is reported
+
+    rig.lifecycle.launch_batch = drop_first
+    finish_on_sleep(rig, index=1)
+    out = run(rig, [{"agent": "explorer", "goal": "a"}, {"agent": "researcher", "goal": "b"}])
+    assert [r["status"] for r in out["results"]] == ["failed", "succeeded"]
+    assert out["results"][0]["note"] == "launch_failed" and "no handle" in out["results"][0]["error"]
+    assert len(rig.lifecycle.requests) == 2  # no second launch for the dropped run
+    assert rig.service._runs[out["results"][1]["run_id"]].subagent_id == "sa-0-00000001"  # bound by run id
+
+
+def test_batch_keeps_order_when_one_task_fails_before_launch(rig):
+    # The reviewer is routed to a provider the lead does not run on, without a model: fails in _prepare.
+    rig.host.settings = {"overrides": {"reviewer": {"provider": "other", "model": None}}}
+    rig.host.fields = rig.host.fields - {"provider"}
+    finish_on_sleep(rig)
+    finish_on_sleep(rig, index=1)
+    out = run(rig, [{"agent": "explorer", "goal": "a"}, {"agent": "reviewer", "goal": "r"},
+                    {"agent": "researcher", "goal": "b"}])
+    assert [r["status"] for r in out["results"]] == ["succeeded", "failed", "succeeded"]
+    assert out["results"][1]["note"] in {"model_required", "provider_unsupported"}
+    assert [r.goal for r in rig.lifecycle.batches[0]] == ["a", "b"]
+
+
 def test_agent_brief_travels_in_context(rig):
     finish_on_sleep(rig)
     run(rig, [{"agent": "reviewer", "goal": "review", "context": "the plan: step 1, step 2"}])

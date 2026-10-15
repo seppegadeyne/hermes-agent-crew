@@ -192,6 +192,11 @@ Provider routing depends on the Hermes build:
 - Hermes records each child as its own session (model, provider, usage) and folds its cost into
   the lead's.
 - Run state lives in memory. After a restart, unreported runs come back as `unknown`.
+- Display: on a Hermes build with lifecycle display parity (`register_tool(ui_card=...)` and
+  `launch_batch`), an `agents_run` call renders like `delegate_task` in Hermes Desktop and the TUI:
+  the delegation card with one row per agent, the batch grouped in the Agents panel, and a live
+  transcript per agent. On older builds the children still appear in the Agents panel, but the
+  call shows as a generic tool row and the transcript tail is missing.
 
 ## Development
 
