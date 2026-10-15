@@ -9,6 +9,7 @@ Hermes build moves them. Tests replace this class with a fake.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,20 @@ class HermesHost:
     @property
     def lifecycle(self) -> Any:
         return self.ctx.subagent_lifecycle
+
+    def supports_batch(self) -> bool:
+        """True when the lifecycle API can launch several children as one delegation."""
+        try:
+            return callable(getattr(self.lifecycle, "launch_batch", None))
+        except Exception:
+            return False
+
+    def supports_ui_card(self) -> bool:
+        """True when ``register_tool`` takes ``ui_card`` (the tool then renders as a delegation card)."""
+        try:
+            return "ui_card" in inspect.signature(self.ctx.register_tool).parameters
+        except Exception:
+            return False
 
     @staticmethod
     def home() -> Path:

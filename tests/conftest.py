@@ -97,20 +97,33 @@ class FakeLifecycle:
         self.raise_on_launch = None
         self.fire_start_hook = True
         self.checks_during_launch = []
+        self.batches = []  # request lists handed to launch_batch
+        self.raise_on_batch = None
 
     def launch(self, request):
         if self.raise_on_launch is not None:
             raise self.raise_on_launch
+        return self._start(request)
+
+    def launch_batch(self, requests):
+        """Hermes builds and starts the children in order; subagent_start fires for each before returning."""
+        requests = list(requests)
+        if self.raise_on_batch is not None:
+            raise self.raise_on_batch
+        self.batches.append(requests)
+        return [self._start(request) for request in requests]
+
+    def _start(self, request):
         subagent_id = f"sa-0-{len(self.requests):08x}"
         self.requests.append(request)
         if self.fire_start_hook:
             service = self.service_getter()
             service.on_subagent_start(child_subagent_id=subagent_id, child_session_id=f"child-{subagent_id}",
-                                      child_role="leaf")
+                                      child_role="leaf", child_goal=getattr(request, "goal", None))
             # What the child's first tool call would see before launch() even returns.
             self.checks_during_launch.append(service.pre_tool_call(tool_name="write_file", task_id=subagent_id))
         self.state[subagent_id] = "RUNNING"
-        return SimpleNamespace(subagent_id=subagent_id,
+        return SimpleNamespace(subagent_id=subagent_id, correlation_id=getattr(request, "correlation_id", None),
                                provider=getattr(request, "provider", None) or "lead-provider",
                                model=getattr(request, "model", None) or "lead-model")
 
@@ -188,6 +201,12 @@ class FakeHost:
 
     def in_child_context(self):
         return False
+
+    def supports_batch(self):
+        return callable(getattr(self.lifecycle, "launch_batch", None))
+
+    def supports_ui_card(self):
+        return True
 
 
 @pytest.fixture

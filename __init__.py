@@ -15,17 +15,21 @@ PROMPT_SECTION_ID = "claude-agents.guide"
 
 
 def register(ctx):
-    service = AgentsService(HermesHost(ctx))
+    host = HermesHost(ctx)
+    service = AgentsService(host)
     try:
         _, _, roster = service.config()
     except Exception:
         roster = Roster()
     description = tool_description(roster)
+    # On a Hermes build that takes it, agents_run renders as the delegation card (one row per agent,
+    # like delegate_task) and keeps its lifecycle visible with display.tool_progress off.
+    card = {"ui_card": "delegate"} if host.supports_ui_card() else {}
     for name in agents_tools.TOOL_NAMES:
         schema = agents_tools.schema(name, description)
         ctx.register_tool(name=name, toolset=agents_tools.TOOLSET, schema=schema,
                           handler=agents_tools.handler(name, lambda: service),
-                          description=schema["description"], emoji="🤖")
+                          description=schema["description"], emoji="🤖", **(card if name == "agents_run" else {}))
     ctx.register_hook("pre_tool_call", service.pre_tool_call)
     ctx.register_hook("subagent_start", service.on_subagent_start)
     ctx.register_hook("subagent_stop", service.on_subagent_stop)

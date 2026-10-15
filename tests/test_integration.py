@@ -109,6 +109,73 @@ def test_real_lifecycle_launch_guard_and_result(loaded, monkeypatch):
     assert _dispatch_pre_tool_call_hooks("write_file", {"path": "x"}, task_id="lead-task")[0] is None
 
 
+def test_real_launch_batch_binds_each_childs_policy(loaded, monkeypatch):
+    """Two agents through Hermes' real launch_batch and hook dispatch: one delegation, one policy per child."""
+    from agent.subagent_lifecycle import SubagentLifecycleService, bind_subagent_parent
+    from hermes_cli.lifecycle import invoke_hook
+    from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
+    from tools import delegate_tool
+    from tools.registry import registry
+
+    if not hasattr(SubagentLifecycleService, "launch_batch"):
+        pytest.skip("this Hermes build has no launch_batch")
+    built, guard_seen_at_start = [], {}
+
+    def resolve(cfg, parent):
+        return {"model": cfg.get("model") or None, "provider": cfg.get("provider") or None,
+                "base_url": "process://x" if cfg.get("provider") else None,
+                "api_key": "test-placeholder" if cfg.get("provider") else None,
+                "api_mode": "chat_completions" if cfg.get("provider") else None}
+
+    def build(**kwargs):
+        child_id = f"child-{kwargs['task_index']}"
+        built.append(kwargs)
+        invoke_hook("subagent_start", parent_session_id="lead", parent_turn_id="t1", parent_subagent_id=None,
+                    child_session_id=f"{child_id}-session", child_subagent_id=child_id, child_role="leaf",
+                    child_goal=kwargs["goal"])
+        guard_seen_at_start[child_id] = _dispatch_pre_tool_call_hooks("write_file", {"path": "x"}, task_id=child_id)[0]
+        return SimpleNamespace(_subagent_id=child_id, provider=DIRECT, model=kwargs.get("model"),
+                               _delegate_role="leaf", _delegate_depth=1, session_id=f"{child_id}-session",
+                               _progress_identity_ref={"session_id": f"{child_id}-session"})
+
+    monkeypatch.setattr(delegate_tool, "_resolve_delegation_credentials", resolve, raising=False)
+    monkeypatch.setattr(delegate_tool, "_build_child_preserving_parent_tools", build)
+    monkeypatch.setattr(delegate_tool, "_run_child_lifecycle", lambda index, *args: {
+        "task_index": index, "status": "completed", "summary": f"report {index}", "api_calls": 1,
+        "duration_seconds": 0.5})
+    parent = SimpleNamespace(session_id="lead", provider=DIRECT, model="sonnet", enabled_toolsets=None,
+                             _delegate_depth=0)
+    entry = registry.get_entry("agents_run", scope=loaded.manager.scope_key)
+    with bind_subagent_parent(parent):
+        out = json.loads(entry.handler({"tasks": [{"agent": "explorer", "goal": "Where is the router?"},
+                                                  {"agent": "builder", "goal": "Fix the router"}],
+                                        "wait_seconds": 20}, session_id="lead"))
+    assert out["ok"], out
+    assert [r["status"] for r in out["results"]] == ["succeeded", "succeeded"]
+    assert [r["summary"] for r in out["results"]] == ["report 0", "report 1"]
+    assert [(b["task_index"], b["task_count"]) for b in built] == [(0, 2), (1, 2)]
+    # One delegation for the batch, stamped on every child, and a live transcript each.
+    assert len({b.get("_delegation_id") for b in built}) <= 1
+    # The read-only explorer was guarded before its first tool call; the builder may write.
+    assert guard_seen_at_start["child-0"] and "read-only" in guard_seen_at_start["child-0"]
+    assert guard_seen_at_start["child-1"] is None
+
+
+def test_agents_run_declares_the_delegation_card_when_hermes_takes_it(loaded):
+    """On a Hermes build with `register_tool(ui_card=...)`, agents_run renders like delegate_task."""
+    import inspect
+
+    from hermes_cli.plugins import PluginContext
+    from tools.registry import registry
+
+    entry = registry.get_entry("agents_run", scope=loaded.manager.scope_key)
+    if "ui_card" in inspect.signature(PluginContext.register_tool).parameters:
+        assert getattr(entry, "ui_card", None) == "delegate"
+        assert getattr(registry.get_entry("agents_status", scope=loaded.manager.scope_key), "ui_card", None) is None
+    else:  # older builds: registered without the card, nothing else changes
+        assert getattr(entry, "ui_card", None) is None
+
+
 def test_outside_an_agent_turn_the_tool_refuses(loaded):
     from tools.registry import registry
     entry = registry.get_entry("agents_run", scope=loaded.manager.scope_key)

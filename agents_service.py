@@ -122,8 +122,22 @@ class Run:
 class _Intent:
     """Set while one launch runs, so the subagent_start hook binds the policy before the child acts."""
     policy: ChildPolicy
+    goal: str = ""
     subagent_id: str | None = None
     child_session_id: str | None = None
+
+
+@dataclass
+class _Batch:
+    """Set while one ``launch_batch`` runs: Hermes builds the children in request order and fires
+    ``subagent_start`` for each before the call returns. The hook binds the first unbound intent with the
+    child's goal, and the next unbound one in order when the goal is missing or ambiguous."""
+    intents: list[_Intent]
+
+    def take(self, child_goal: Any) -> _Intent | None:
+        unbound = [i for i in self.intents if i.subagent_id is None]
+        matches = [i for i in unbound if child_goal and i.goal == child_goal]
+        return matches[0] if len(matches) == 1 else (unbound[0] if unbound else None)
 
 
 class AgentsService:
@@ -150,8 +164,11 @@ class AgentsService:
 
     # ------------------------------------------------------------------ hooks
 
-    def on_subagent_start(self, child_subagent_id: Any = None, child_session_id: Any = None, **_: Any) -> None:
+    def on_subagent_start(self, child_subagent_id: Any = None, child_session_id: Any = None,
+                          child_goal: Any = None, **_: Any) -> None:
         intent = self._intent.get()
+        if isinstance(intent, _Batch):
+            intent = intent.take(child_goal)
         if intent is None or not child_subagent_id:
             return None
         intent.subagent_id = str(child_subagent_id)
@@ -283,8 +300,15 @@ class AgentsService:
                           f"{settings['max_live_runs']}). Collect them with agents_status first.")
         features = self.features()
         parent_provider = str(getattr(parent, "provider", "") or "")
-        runs = [self._launch(spec, task, parent, parent_provider, session_id, settings, features)
-                for spec, task in tasks]
+        prepared = [self._prepare(spec, task, parent, parent_provider, session_id, settings, features)
+                    for spec, task in tasks]
+        runs = [run for run, _, _ in prepared]
+        pending = [(run, kwargs, spec) for run, kwargs, spec in prepared if kwargs is not None]
+        if len(pending) > 1 and self.host.supports_batch():
+            self._launch_batch(pending, parent, parent_provider)
+        for run, kwargs, spec in pending:
+            if run.status == "running" and run.handle is None:
+                self._launch(run, kwargs, spec, parent, parent_provider)
         early = self._wait(runs, started + self._wait_budget(args.get("wait_seconds"), settings))
         return self._report(runs, settings, problems, roster, early)
 
@@ -397,8 +421,9 @@ class AgentsService:
                 return path
         raise Refusal("invalid_workdir", f"{where}: workdir {raw!r} is not an existing absolute folder path.")
 
-    def _launch(self, spec: AgentSpec, task: dict, parent: Any, parent_provider: str, session_id: str,
-                settings: dict, features: dict) -> Run:
+    def _prepare(self, spec: AgentSpec, task: dict, parent: Any, parent_provider: str, session_id: str,
+                 settings: dict, features: dict) -> tuple:
+        """The run and its launch request, or ``(run, None, spec)`` when the run failed before launch."""
         run = Run(run_id="ag_" + uuid.uuid4().hex[:10], agent=spec.name, owner_session_id=session_id,
                   goal=task["goal"], readonly=spec.readonly, owner_ref=_weak(parent), model=spec.model,
                   started_at=self.wall())
@@ -411,30 +436,68 @@ class AgentsService:
             kwargs["allowed_toolsets"] = toolsets
         if spec.provider:
             if spec.model is None and parent_provider and spec.provider != parent_provider:
-                return self._fail(run, "model_required",
-                                  f"Agent '{spec.name}' inherits the lead's model but runs on provider "
-                                  f"'{spec.provider}' while the lead runs on '{parent_provider}'. Give the agent a "
-                                  "model in its file or in settings.overrides.")
+                return (self._fail(run, "model_required",
+                                   f"Agent '{spec.name}' inherits the lead's model but runs on provider "
+                                   f"'{spec.provider}' while the lead runs on '{parent_provider}'. Give the agent a "
+                                   "model in its file or in settings.overrides."), None, spec)
             if features["provider"]:
                 kwargs["provider"] = spec.provider
                 # An explicit route resolves its own model; "inherit" must still mean the lead's model.
                 kwargs["model"] = spec.model or (str(getattr(parent, "model", "") or "") or None)
             elif spec.provider != parent_provider:
-                return self._fail(run, "provider_unsupported",
-                                  f"Agent '{spec.name}' runs on provider '{spec.provider}', but this Hermes build can "
-                                  f"only run agents on the lead's provider ('{parent_provider or 'unknown'}'). Switch "
-                                  "the lead to that provider, or update Hermes to a build whose "
-                                  "SubagentLaunchRequest has a provider field (NousResearch/hermes-agent#137167).")
+                return (self._fail(run, "provider_unsupported",
+                                   f"Agent '{spec.name}' runs on provider '{spec.provider}', but this Hermes build "
+                                   f"can only run agents on the lead's provider ('{parent_provider or 'unknown'}'). "
+                                   "Switch the lead to that provider, or update Hermes to a build whose "
+                                   "SubagentLaunchRequest has a provider field (NousResearch/hermes-agent#137167)."),
+                        None, spec)
         if spec.effort:
             if features["effort"]:
                 kwargs["reasoning_effort"] = spec.effort
             else:
                 run.unsupported.append("effort")
+        return run, kwargs, spec
+
+    def _launch_batch(self, pending: list, parent: Any, parent_provider: str) -> None:
+        """Launch every pending run as ONE delegation (a Hermes build with ``launch_batch``).
+
+        The host mints the batch identity the UIs group by (``delegation_id``, ``task_index`` of
+        ``task_count``), so an ``agents_run`` call displays like a multi-task ``delegate_task`` call.
+        The host validates and routes every request before it builds a child: a batch rejected there (a
+        toolset narrowing one build does not accept, for example) started nothing, and every run falls
+        back to its own launch, which keeps the per-run retry and the per-run error. Once handles come
+        back the children are running, so a run is never launched a second time.
+        """
+        intents = [_Intent(ChildPolicy.for_spec(spec), goal=kwargs["goal"]) for _, kwargs, spec in pending]
+        token = self._intent.set(_Batch(intents))
+        try:
+            handles = self.host.lifecycle.launch_batch([self.host.make_request(**kwargs) for _, kwargs, _ in pending])
+        except Exception as exc:
+            for run, _, _ in pending:
+                run.note = f"batch_refused: {type(exc).__name__}: {clip(exc, 200)}"
+            return
+        finally:
+            self._intent.reset(token)
+        # Handles came back, so children are running: never launch any of these runs again. Each handle
+        # names its run through correlation_id; a run without a handle failed on the host side.
+        handles = list(handles or [])
+        by_run_id = {str(getattr(h, "correlation_id", "") or ""): h for h in handles}
+        for position, ((run, kwargs, _), intent) in enumerate(zip(pending, intents, strict=True)):
+            handle = by_run_id.get(run.run_id)
+            if handle is None and not by_run_id and position < len(handles):
+                handle = handles[position]  # a host whose handles carry no correlation_id: by position
+            if handle is None:
+                self._fail(run, "launch_failed", "The batch launch returned no handle for this agent.")
+                continue
+            bound = next((i for i in intents if i.subagent_id == getattr(handle, "subagent_id", None)), intent)
+            self._bind(run, kwargs, handle, bound, parent_provider)
+
+    def _launch(self, run: Run, kwargs: dict, spec: AgentSpec, parent: Any, parent_provider: str) -> Run:
         # Narrowing derived from an agent's tool list only trims the schema (the guard enforces the
         # list), so a build that refuses those toolsets gets one retry without them. Narrowing from an
         # explicit `toolsets:` key is the only restriction an unguarded agent has: no retry there.
         retry_without_toolsets = "allowed_toolsets" in kwargs and not spec.toolsets and spec.tools is not None
-        intent = _Intent(ChildPolicy.for_spec(spec))
+        intent = _Intent(ChildPolicy.for_spec(spec), goal=kwargs["goal"])
         token = self._intent.set(intent)
         try:
             try:
@@ -449,6 +512,9 @@ class AgentsService:
             return self._fail(run, "launch_failed", f"{type(exc).__name__}: {clip(exc, 1500)}")
         finally:
             self._intent.reset(token)
+        return self._bind(run, kwargs, handle, intent, parent_provider)
+
+    def _bind(self, run: Run, kwargs: dict, handle: Any, intent: _Intent, parent_provider: str) -> Run:
         with self._lock:
             run.handle = handle
             run.subagent_id = str(getattr(handle, "subagent_id", "") or intent.subagent_id or "") or None
