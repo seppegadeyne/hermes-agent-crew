@@ -13,10 +13,10 @@ provider default, tool permissions and instructions remain intact. Four addition
 | `builder` | sonnet | Claude subscription* | unchanged | writer |
 | `explorer` | haiku | Claude subscription* | unchanged | read-only |
 | `researcher` | haiku | Claude subscription* | unchanged | read-only |
-| `codex-reviewer` | gpt-6-sol | openai-codex | high | read-only |
-| `codex-builder` | gpt-6-sol | openai-codex | medium | writer |
-| `codex-explorer` | gpt-6-luna | openai-codex | low | read-only |
-| `codex-researcher` | gpt-6-luna | openai-codex | low | read-only |
+| `codex-reviewer` | gpt-6.1-sol-900k | openai-codex | high | read-only |
+| `codex-builder` | gpt-6.1-sol-900k | openai-codex | medium | writer |
+| `codex-explorer` | gpt-6-luna-900k | openai-codex | low | read-only |
+| `codex-researcher` | gpt-6-luna-900k | openai-codex | low | read-only |
 
 *The original default is `claude-subscription-directsdk-experimental`, provided by
 [the original Claude subscription provider plugin](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk).
@@ -108,7 +108,7 @@ An agent is a Markdown file with a small frontmatter block, the format Claude Co
 name: security-reviewer
 description: Read-only security review of a diff (Sol).
 provider: openai-codex
-model: gpt-6-sol
+model: gpt-6.1-sol-900k
 readonly: true
 ---
 You review changes for injection, authentication and secret-handling bugs. Cite file:line.
@@ -149,7 +149,7 @@ plugins:
       settings:
         overrides:
           reviewer: {model: sonnet}
-          codex-reviewer: {model: gpt-6-sol, effort: high}
+          codex-reviewer: {model: gpt-6.1-sol-900k, effort: high}
           builder: {enabled: false}
         max_parallel_writers: 1
 ```

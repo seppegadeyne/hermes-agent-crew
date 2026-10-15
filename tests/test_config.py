@@ -185,10 +185,10 @@ def test_codex_defaults_and_builtin_efforts(hermes_home):
     roster = cfg.load_roster(settings, hermes_home)
     assert {name: (spec.model, spec.provider, spec.effort) for name, spec in roster.agents.items()
             if name.startswith("codex-")} == {
-        "codex-reviewer": ("gpt-6-sol", "openai-codex", "high"),
-        "codex-builder": ("gpt-6-sol", "openai-codex", "medium"),
-        "codex-explorer": ("gpt-6-luna", "openai-codex", "low"),
-        "codex-researcher": ("gpt-6-luna", "openai-codex", "low")}
+        "codex-reviewer": ("gpt-6.1-sol-900k", "openai-codex", "high"),
+        "codex-builder": ("gpt-6.1-sol-900k", "openai-codex", "medium"),
+        "codex-explorer": ("gpt-6-luna-900k", "openai-codex", "low"),
+        "codex-researcher": ("gpt-6-luna-900k", "openai-codex", "low")}
     assert all(roster.agents[n].effort is None for n in ("reviewer", "builder", "explorer", "researcher"))
 
 
@@ -201,7 +201,7 @@ def test_none_reasoning_effort_is_preserved(hermes_home):
 
 def test_codex_folder_overrides_claude_folder(hermes_home):
     write(hermes_home / "claude-agents", "custom.md", "---\nname: custom\nmodel: sonnet\n---\nClaude")
-    write(hermes_home / "codex-agents", "custom.md", "---\nname: custom\nmodel: gpt-6-sol\nprovider: openai-codex\n---\nCodex")
+    write(hermes_home / "codex-agents", "custom.md", "---\nname: custom\nmodel: gpt-6.1-sol-900k\nprovider: openai-codex\n---\nCodex")
     settings, _ = defaults()
     custom = cfg.load_roster(settings, hermes_home).agents["custom"]
-    assert (custom.model, custom.provider, custom.instructions) == ("gpt-6-sol", "openai-codex", "Codex")
+    assert (custom.model, custom.provider, custom.instructions) == ("gpt-6.1-sol-900k", "openai-codex", "Codex")

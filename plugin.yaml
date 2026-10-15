@@ -28,7 +28,7 @@ config_schema:
     type: dict
     default: {}
     label: Per-agent overrides
-    description: "Change an agent without editing its file, for example {\"codex-reviewer\": {\"model\": \"gpt-6-sol\"}, \"builder\": {\"enabled\": false}}. Keys: model, provider, effort, enabled."
+    description: "Change an agent without editing its file, for example {\"codex-reviewer\": {\"model\": \"gpt-6.1-sol-900k\"}, \"builder\": {\"enabled\": false}}. Keys: model, provider, effort, enabled."
   max_parallel:
     type: int
     default: 12

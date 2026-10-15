@@ -3,7 +3,7 @@ name: codex-reviewer
 provider: openai-codex
 description: Senior read-only reviewer (Sol). Use before locking a multi-file plan, when the same test or build error fails twice, and before calling non-trivial work done. Pass attach_diff for diff reviews.
 use_when: locking a multi-file plan, the same error failed twice, or before calling non-trivial work done
-model: gpt-6-sol
+model: gpt-6.1-sol-900k
 effort: high
 readonly: true
 ---

@@ -3,7 +3,7 @@ name: codex-explorer
 provider: openai-codex
 description: Fast read-only codebase scout (Luna). Finds files, symbols, call sites and config; maps how a feature is wired. Send several in parallel for separate areas.
 use_when: you would otherwise read or grep many files to find where something lives or how it is wired
-model: gpt-6-luna
+model: gpt-6-luna-900k
 effort: low
 readonly: true
 ---

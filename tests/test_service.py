@@ -494,10 +494,10 @@ def test_codex_default_route_and_builtin_effort_reach_lifecycle(rig):
     run(rig, [{"agent": name, "goal": "Inspect"} for name in
               ("codex-reviewer", "codex-builder", "codex-explorer", "codex-researcher")], wait_seconds=0)
     assert [(r.provider, r.model, r.reasoning_effort) for r in rig.lifecycle.requests] == [
-        ("openai-codex", "gpt-6-sol", "high"),
-        ("openai-codex", "gpt-6-sol", "medium"),
-        ("openai-codex", "gpt-6-luna", "low"),
-        ("openai-codex", "gpt-6-luna", "low"),
+        ("openai-codex", "gpt-6.1-sol-900k", "high"),
+        ("openai-codex", "gpt-6.1-sol-900k", "medium"),
+        ("openai-codex", "gpt-6-luna-900k", "low"),
+        ("openai-codex", "gpt-6-luna-900k", "low"),
     ]
 
 
@@ -514,7 +514,7 @@ def test_mixed_provider_readers_and_shared_writer_limit(rig):
               wait_seconds=0)
     assert len(out["pending"]) == 2
     assert [(r.provider, r.model) for r in rig.lifecycle.requests] == [
-        (DIRECT, "haiku"), ("openai-codex", "gpt-6-luna")]
+        (DIRECT, "haiku"), ("openai-codex", "gpt-6-luna-900k")]
     assert all(check["action"] == "block" for check in rig.lifecycle.checks_during_launch)
     out = run(rig, [{"agent": name, "goal": "Build"} for name in ("builder", "codex-builder")],
               wait_seconds=0)

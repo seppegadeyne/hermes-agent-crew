@@ -3,7 +3,7 @@ name: codex-researcher
 provider: openai-codex
 description: Read-only docs and web researcher (Luna). Looks up library, API and spec documentation, changelogs and known issues, and quotes the source.
 use_when: you need library, API or spec documentation, a changelog or a known issue, with sources
-model: gpt-6-luna
+model: gpt-6-luna-900k
 effort: low
 readonly: true
 ---

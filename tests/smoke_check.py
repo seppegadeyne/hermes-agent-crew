@@ -108,10 +108,10 @@ class SmokeTests(unittest.TestCase):
             "builder": ("sonnet", "claude-subscription-directsdk-experimental", None),
             "explorer": ("haiku", "claude-subscription-directsdk-experimental", None),
             "researcher": ("haiku", "claude-subscription-directsdk-experimental", None),
-            "codex-reviewer": ("gpt-6-sol", "openai-codex", "high"),
-            "codex-builder": ("gpt-6-sol", "openai-codex", "medium"),
-            "codex-explorer": ("gpt-6-luna", "openai-codex", "low"),
-            "codex-researcher": ("gpt-6-luna", "openai-codex", "low")})
+            "codex-reviewer": ("gpt-6.1-sol-900k", "openai-codex", "high"),
+            "codex-builder": ("gpt-6.1-sol-900k", "openai-codex", "medium"),
+            "codex-explorer": ("gpt-6-luna-900k", "openai-codex", "low"),
+            "codex-researcher": ("gpt-6-luna-900k", "openai-codex", "low")})
 
     def test_registration(self):
         tools, hooks, commands, sections = {}, {}, {}, {}
@@ -132,7 +132,7 @@ class SmokeTests(unittest.TestCase):
         out = self.launch()
         self.assertTrue(out["ok"])
         req = self.host.lifecycle.requests[0]
-        self.assertEqual((req.provider, req.model, req.reasoning_effort), ("openai-codex", "gpt-6-luna", "low"))
+        self.assertEqual((req.provider, req.model, req.reasoning_effort), ("openai-codex", "gpt-6-luna-900k", "low"))
         guard = self.host.lifecycle.guards[0]
         self.assertIsNone(guard["read_file"])
         for name in ("write_file", "agents_run", "delegate_task"):
@@ -145,7 +145,7 @@ class SmokeTests(unittest.TestCase):
                                          for name in ("explorer", "codex-explorer")], "wait_seconds": 0})
         self.assertEqual(len(out["pending"]), 2)
         self.assertEqual([(r.provider, r.model) for r in self.host.lifecycle.requests], [
-            ("claude-subscription-directsdk-experimental", "haiku"), ("openai-codex", "gpt-6-luna")])
+            ("claude-subscription-directsdk-experimental", "haiku"), ("openai-codex", "gpt-6-luna-900k")])
         for guard in self.host.lifecycle.guards:
             self.assertIsNone(guard["read_file"])
             for name in ("write_file", "agents_run", "delegate_task"):
