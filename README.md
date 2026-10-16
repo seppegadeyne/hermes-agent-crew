@@ -59,6 +59,36 @@ Requirements:
   refuse with a clear message.
 - A provider that knows the model names in your agent files and tiers.
 
+## The /crew command
+
+`/crew` is a read-only status command for the operator; it starts nothing. Type it in a Hermes
+session (CLI, TUI or a gateway chat). It takes no arguments and shows:
+
+- every agent with its tier and model, its provider, and `read-only` where that applies;
+- for a tier with several routes, the chain in order (`routes (first reachable runs): ...`) with
+  `[down]` after a local endpoint that does not answer right now;
+- each agent's `use when` trigger, which is what the lead reads to pick it;
+- the agent folders in load order (a later file with the same name replaces an earlier one);
+- whether this Hermes build supports a provider and an effort per agent;
+- runs in progress in this process, and any problems in agent files or settings.
+
+```text
+Agents (5):
+  explorer (fast: strata or haiku, read-only) - Fast read-only codebase scout. ...
+    routes (first reachable runs): strata-qwen/strata [down] -> claude-subscription-directsdk-experimental/haiku
+    use when: you would otherwise read or grep many files to find where something lives or how it is wired
+  reviewer (strong: opus, claude-subscription-directsdk-experimental, read-only) - Senior read-only reviewer. ...
+Agent folders (a later folder overrides an earlier one): .../agents; ~/.hermes/claude-agents
+This Hermes build: per-agent provider=yes, per-agent effort=no
+Runs in progress in this process: 0
+```
+
+Use it after changing an agent file or the `tiers`/`overrides` settings (the roster reloads on its
+own; no restart needed), to see whether a local model is reachable, or when the lead says it cannot
+find an agent. Agents are started by the lead with `agents_run`, not by this command: ask the lead
+in plain language ("let the explorer find ...", "run this as a plan") or let it decide. `/claude-agents`
+is a deprecated alias for one release.
+
 ## Tools
 
 `agents_run` starts one or more agents in parallel and waits for their final reports:
