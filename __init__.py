@@ -1,7 +1,8 @@
-"""hermes-claude-agents: named Claude subagents for Hermes.
+"""hermes-agent-crew: named subagents for Hermes, on any provider.
 
-Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format);
-the lead model picks an agent by name, the operator's files decide model, tools and read-only status.
+Strong models review, balanced models build, fast models swarm. Agents are Markdown files (the Claude
+Code agent format); the lead model picks an agent by name, the operator's files and settings decide
+model, provider, tools and read-only status.
 Children run through Hermes' public subagent lifecycle API; no core patch.
 """
 from __future__ import annotations
@@ -11,7 +12,7 @@ from .agents_config import Roster
 from .agents_host import HermesHost
 from .agents_service import AgentsService, tool_description
 
-PROMPT_SECTION_ID = "claude-agents.guide"
+PROMPT_SECTION_ID = "crew.guide"
 
 
 def register(ctx):
@@ -37,7 +38,12 @@ def register(ctx):
         try:
             return service.roster_text()
         except Exception as exc:
-            return f"hermes-claude-agents: {str(exc)[:500]}"
+            return f"hermes-agent-crew: {str(exc)[:500]}"
 
-    ctx.register_command("claude-agents", handler=command, description="List the Claude agents and their models")
+    ctx.register_command("crew", handler=command, description="List the agents, their models and providers")
+
+    def deprecated(raw_args: str = "", **_kwargs) -> str:
+        return "/claude-agents is deprecated; use /crew.\n" + command(raw_args)
+
+    ctx.register_command("claude-agents", handler=deprecated, description="Deprecated alias of /crew")
     return service

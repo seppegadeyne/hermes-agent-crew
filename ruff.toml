@@ -9,5 +9,5 @@ ignore = ["SIM105", "SIM108"]
 "tests/*" = ["E501"]
 
 [lint.isort]
-known-first-party = ["hermes_claude_agents"]
+known-first-party = ["hermes_agent_crew"]
 known-third-party = ["conftest"]

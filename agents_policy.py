@@ -78,7 +78,7 @@ class ChildPolicy:
     def decide(self, tool_name: str, args: Any = None) -> str | None:
         """Block message for a tool call, or None to let it through."""
         if tool_name in OWN_TOOLS:
-            return (f"hermes-claude-agents: agent '{self.agent}' cannot start other agents. "
+            return (f"hermes-agent-crew: agent '{self.agent}' cannot start other agents. "
                     "Finish the task yourself and report back.")
         if self.scopes and tool_name in PATH_WRITE_TOOLS:
             message = self._outside_scope(tool_name, args)
@@ -92,33 +92,33 @@ class ChildPolicy:
         if tool_name == "tool_call":
             # Hermes unwraps a valid single tool_call before this check and checks the real tool; what lands
             # here is a connector batch, an out-of-scope tool or arguments that failed the schema probe.
-            return (f"hermes-claude-agents: this tool_call was blocked for agent '{self.agent}': it is a batch, or "
+            return (f"hermes-agent-crew: this tool_call was blocked for agent '{self.agent}': it is a batch, or "
                     "it did not resolve to a tool this agent may use. Send one entry per tool_call, with the exact "
                     f"name and arguments from tool_describe. Usable tools: {usable}.")
         if self.readonly:
-            return (f"hermes-claude-agents: agent '{self.agent}' is read-only, so '{tool_name}' is blocked. "
+            return (f"hermes-agent-crew: agent '{self.agent}' is read-only, so '{tool_name}' is blocked. "
                     f"Usable tools: {usable}. Investigate and report instead of changing anything.")
-        return (f"hermes-claude-agents: agent '{self.agent}' may only use its configured tools, so "
+        return (f"hermes-agent-crew: agent '{self.agent}' may only use its configured tools, so "
                 f"'{tool_name}' is blocked. Usable tools: {usable}.")
 
     def _outside_scope(self, tool_name: str, args: Any) -> str | None:
         allowed = ", ".join(self.scopes)
         targets = edit_targets(tool_name, args)
         if not targets:
-            return (f"hermes-claude-agents: agent '{self.agent}' may only change files in its write scope "
+            return (f"hermes-agent-crew: agent '{self.agent}' may only change files in its write scope "
                     f"({allowed}), and this {tool_name} call names no path; blocked.")
         for raw in targets:
             text = str(raw).strip()
             # Hermes resolves relative and ~ paths against the child's own cwd (which `cd` moves) and the
             # profile home, neither of which the guard can see: a scoped writer must name absolute paths.
             if not text.startswith(os.sep):
-                return (f"hermes-claude-agents: agent '{self.agent}' has a write scope ({allowed}), so file edits "
+                return (f"hermes-agent-crew: agent '{self.agent}' has a write scope ({allowed}), so file edits "
                         f"need absolute paths; '{raw}' is relative. Retry with the absolute path.")
             # realpath touches the filesystem; this only runs for the plugin's own scoped writers, and the
             # caller turns any error into a block. A symlink inside the scope must not lead out of it.
             path = os.path.realpath(os.path.normpath(text))
             if not any(within(path, scope) for scope in self.scopes):
-                return (f"hermes-claude-agents: agent '{self.agent}' may only change files in its write scope "
+                return (f"hermes-agent-crew: agent '{self.agent}' may only change files in its write scope "
                         f"({allowed}); '{raw}' is outside it, so this {tool_name} call is blocked. Stay inside "
                         "the scope, or report what else needs to change.")
         return None

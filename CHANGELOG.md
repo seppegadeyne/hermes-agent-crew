@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.6.0 (2026-10-16)
+
+The plugin is now provider-neutral: any model Hermes can reach can be an agent, local endpoints
+included, and the lead is whatever model the session runs on. Expected effect on the plugin goals:
+the fast tier can move scans and verification to a local or cheap model, so the same job costs fewer
+paid tokens; the lead's context is unchanged. Live check: a lead on a local llama.cpp model
+(named `providers:` entry) ran one `agents_run` call with an explorer on the fast tier mapped to that
+local endpoint (6 API calls, no paid tokens) and the reviewer on the Claude subscription (opus, 2 API
+calls); the child sessions recorded exactly those providers and models. Token savings over a fully
+paid run are not measured yet.
+
+Breaking: plugin id `hermes-claude-agents` -> `hermes-agent-crew`. Move enablement and settings
+once (README, "Upgrading from hermes-claude-agents"); never enable both ids.
+
+- Model tiers. Agent files can name `tier: strong | balanced | fast` instead of a model; the new
+  `tiers` setting maps each tier to a `model` and optionally a `provider`. The built-in agents use
+  tiers, and the defaults keep today's routes (opus, sonnet, haiku on the `provider` setting), so
+  nothing changes without configuration. Model and provider resolve one field at a time: override,
+  then the agent file, then the tier, then the `provider` setting. A tier without a provider keeps
+  `provider: inherit` working; agent files with a `model` (and Claude Code files) ignore tiers. An
+  unknown tier, or `tier` together with `model: inherit` or `provider: inherit` in one file, is an
+  agent file problem. An invalid `tiers` entry leaves that tier's agents out with a problem line,
+  never falling back to the default (possibly paid) route. A tier change reloads the roster.
+- Fallback routes for local models. A tier can list up to 4 routes; before each launch the plugin
+  probes named `providers:` endpoints (`GET <base_url>/models`, 2 s, cached 60 s up / 15 s down;
+  hosted providers are never probed) and runs the agent on the first route that answers, with the
+  skipped routes in the run's `note`. Example: `fast: [{provider: strata-qwen, model: strata},
+  {model: haiku}]` scouts locally while the server runs and on haiku when it does not. Skipped
+  routes are listed in the run's new `fallback` field. Endpoint lookup uses Hermes' own matching of
+  named providers, probes bypass HTTP proxies, pinning one field picks the route that agrees with it,
+  and builds without per-launch provider routing skip routes on other providers. With no
+  reachable route the run fails at once (`endpoint_unavailable`) instead of hanging on a dead
+  endpoint; other runs in the call are unaffected. `/crew` marks down routes. Live check: a dead
+  endpoint was skipped to strata-qwen, and with both local routes dead the explorer ran on haiku.
+- Named `providers:` entries (for example a local llama.cpp or TabbyAPI server) work as an agent's or
+  tier's provider through Hermes' own provider resolution; an integration test proves the child
+  gets that endpoint and model and never the lead's key. A second test pins that a provider-less
+  launch (`provider: inherit`) follows Hermes' `delegation:` config, not the lead.
+- Each run's result now includes its `provider`. Roster labels show the tier: `explorer (fast:
+  haiku, read-only)`.
+- `/crew` replaces `/claude-agents`, which stays one release as a deprecated alias. The prompt
+  section id is `crew.guide`, and the plugin's own text (prompt guide, tool descriptions, guard
+  messages, built-in agent descriptions) names no vendor or model; a test keeps it that way.
+- Unchanged on purpose: the toolset id `claude_agents` (renaming it would re-enable the toolset in
+  saved `platform_toolsets` lists where operators turned it off), the tool names and the default
+  agent folder `{hermes_home}/claude-agents`.
+- AGENTS.md has a Purpose section: every change serves faster tasks and fewer lead tokens, builds
+  on what exists, stays opt-in and provider-neutral.
+
 ## 0.5.0 (2026-10-15)
 
 Findings from a day of live sessions (one Opus lead, about 15 conversations): the lead's only

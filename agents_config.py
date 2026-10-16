@@ -1,4 +1,4 @@
-"""Agent roster and settings for hermes-claude-agents.
+"""Agent roster and settings for hermes-agent-crew.
 
 Agents are Markdown files with a small YAML-style frontmatter block, the same shape Claude Code
 uses for ``~/.claude/agents/*.md``::
@@ -12,8 +12,9 @@ uses for ``~/.claude/agents/*.md``::
     Instructions for the agent (the Markdown body).
 
 Supported keys: ``name``, ``description``, ``use_when`` or ``when_to_use`` (the trigger shown to the lead),
-``model`` (``inherit`` = the parent's model),
-``provider``, ``readonly``, ``tools`` (Hermes tool names, or Claude Code names such as Read,
+``model`` (``inherit`` = the parent's model), ``tier`` (``strong``, ``balanced`` or ``fast``: the
+operator's ``tiers`` setting maps it to a model and optionally a provider), ``provider``,
+``readonly``, ``tools`` (Hermes tool names, or Claude Code names such as Read,
 Grep, Glob, WebFetch, Bash, Edit), ``toolsets`` (Hermes toolsets to narrow the child to) and
 ``effort``. Unknown keys are ignored with a warning, so Claude Code files load unchanged.
 
@@ -71,7 +72,7 @@ CLAUDE_CODE_TOOLS: dict[str, tuple[str, ...]] = {
 }
 KNOWN_KEYS = frozenset({
     "name", "description", "use_when", "when_to_use", "model", "provider", "tools", "toolsets", "readonly", "read_only",
-    "read-only", "effort", "reasoning_effort",
+    "read-only", "effort", "reasoning_effort", "tier",
     "color",  # Claude Code UI colour: cosmetic, ignored without a warning
 })
 
@@ -80,12 +81,21 @@ KNOWN_KEYS = frozenset({
 # provider; a mismatch is refused before anything starts.
 DEFAULT_PROVIDER = "claude-subscription-directsdk-experimental"
 INHERIT = "inherit"
+# Vendor-neutral model tiers. Agent files name a tier; the operator's ``tiers`` setting decides what
+# runs it. A tier without a provider runs on the plugin-wide ``provider`` setting, as before tiers.
+TIERS = ("strong", "balanced", "fast")
+DEFAULT_TIERS: dict[str, dict[str, str]] = {
+    "strong": {"model": "opus"},
+    "balanced": {"model": "sonnet"},
+    "fast": {"model": "haiku"},
+}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "agent_dirs": ["{hermes_home}/claude-agents"],
     "import_claude_code_agents": False,
     "provider": DEFAULT_PROVIDER,
     "overrides": {},
+    "tiers": DEFAULT_TIERS,
     "max_parallel": 12,
     "max_live_runs": 24,
     "max_parallel_writers": 1,
@@ -121,6 +131,12 @@ class AgentSpec:
     tools: tuple[str, ...] | None = None
     toolsets: tuple[str, ...] | None = None
     effort: str | None = None
+    tier: str | None = None
+    # Ordered (provider, model) alternatives from a tier with fallbacks; the service launches on the first
+    # route whose endpoint answers. Empty for a single route (model and provider above).
+    routes: tuple[tuple[str | None, str], ...] = ()
+    skipped_routes: tuple[str, ...] = ()  # set per launch: routes whose endpoint did not answer
+    unreachable: bool = False             # set per launch: no route answered
     instructions: str = ""
     source: str = "builtin"
 
@@ -281,6 +297,15 @@ def _check_provider(value: str | None) -> str | None:
     return value
 
 
+def _check_tier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.lower()
+    if value not in TIERS:
+        raise ValueError(f"tier must be one of {', '.join(TIERS)}, not {value!r}")
+    return value
+
+
 def _check_effort(value: str | None) -> str | None:
     if value is None:
         return None
@@ -328,6 +353,13 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
             raise ValueError(f"invalid toolset name(s): {', '.join(bad)}")
         toolsets = tuple(dict.fromkeys(raw)) or None
     effort = _check_effort(_opt_str(meta.get("effort", meta.get("reasoning_effort")), "effort"))
+    tier = _check_tier(_opt_str(meta.get("tier"), "tier"))
+    if tier:
+        inherited = [key for key in ("model", "provider")
+                     if str(_opt_str(meta.get(key), key) or "").lower() == INHERIT]
+        if inherited:
+            raise ValueError(f"tier cannot be combined with {' or '.join(k + ': inherit' for k in inherited)}; "
+                             "drop the tier to run on the lead's route")
     if readonly:
         if tools is None:
             tools = tuple(sorted(READONLY_TOOLS))
@@ -342,14 +374,15 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
         raise ValueError(f"instructions are longer than {MAX_INSTRUCTIONS_CHARS} characters")
     warnings.extend(f"ignored key {key!r}" for key in meta if key not in KNOWN_KEYS)
     spec = AgentSpec(name=name, description=description, use_when=use_when, model=model, provider=provider,
-                     readonly=readonly, tools=tools, toolsets=toolsets, effort=effort, instructions=body, source=source)
+                     readonly=readonly, tools=tools, toolsets=toolsets, effort=effort, tier=tier, instructions=body,
+                     source=source)
     return spec, warnings
 
 
 # --------------------------------------------------------------------------- settings
 
 def read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any], list[str]]:
-    """Plugin settings (plugins.entries.hermes-claude-agents.settings.*) with validation."""
+    """Plugin settings (plugins.entries.hermes-agent-crew.settings.*) with validation."""
     settings: dict[str, Any] = {}
     problems: list[str] = []
     for key, default in DEFAULT_SETTINGS.items():
@@ -382,6 +415,8 @@ def read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any]
                 problems.append("settings.overrides must be a mapping of agent name -> settings; ignored")
                 value = {}
             value = {str(k): v for k, v in value.items()}
+        elif key == "tiers":
+            value = _read_tiers(value, problems)
         elif key == "provider":
             if not isinstance(value, str):
                 problems.append(f"settings.provider must be a provider name or '{INHERIT}'; using {default}")
@@ -396,6 +431,58 @@ def read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any]
     return settings, problems
 
 
+MAX_TIER_ROUTES = 4
+
+
+def _read_route(route: Any) -> dict[str, str]:
+    if not isinstance(route, Mapping):
+        raise ValueError("must be a mapping with model and optionally provider, or a list of those")
+    unknown = [str(k) for k in route if k not in ("model", "provider")]
+    if unknown:
+        raise ValueError(f"unknown key(s) {', '.join(unknown)} (use model, provider)")
+    model = _check_model(_opt_str(route.get("model"), "model"))
+    if model is None:
+        raise ValueError("needs a model")
+    entry = {"model": model}
+    provider = _check_provider(_opt_str(route.get("provider"), "provider"))
+    if provider:
+        entry["provider"] = provider
+    return entry
+
+
+def _read_tiers(value: Any, problems: list[str]) -> dict[str, Any]:
+    """Operator tiers merged over the defaults, one tier at a time.
+
+    A tier is one route ``{model, provider?}`` or an ordered list of routes: the first route whose
+    endpoint answers runs the agent, so a local model can come first with a hosted one behind it.
+    A bad entry maps the tier to ``{}`` (invalid): its agents are left out of the roster rather than
+    falling back to the default route, which may be a paid model the operator meant to move away from.
+    """
+    tiers = {name: dict(route) for name, route in DEFAULT_TIERS.items()}
+    if not isinstance(value, Mapping):
+        problems.append("settings.tiers must be a mapping of tier -> {model, provider}; using the defaults")
+        return tiers
+    for raw_name, route in value.items():
+        name = str(raw_name).strip().lower()
+        if name not in TIERS:
+            problems.append(f"settings.tiers.{raw_name}: unknown tier (use {', '.join(TIERS)}); ignored")
+            continue
+        try:
+            if isinstance(route, list):
+                if not 1 <= len(route) <= MAX_TIER_ROUTES:
+                    raise ValueError(f"a route list needs 1-{MAX_TIER_ROUTES} routes")
+                routes = [_read_route(item) for item in route]
+                entry = routes[0] if len(routes) == 1 else routes
+            else:
+                entry = _read_route(route)
+        except ValueError as exc:
+            problems.append(f"settings.tiers.{name}: {exc}; agents on this tier are left out")
+            tiers[name] = {}
+            continue
+        tiers[name] = entry
+    return tiers
+
+
 # --------------------------------------------------------------------------- roster loading
 
 def agent_dirs(settings: Mapping[str, Any], home: Path) -> list[Path]:
@@ -408,7 +495,41 @@ def agent_dirs(settings: Mapping[str, Any], home: Path) -> list[Path]:
     return list(dict.fromkeys(dirs))
 
 
+def _apply_tiers(roster: Roster, settings: Mapping[str, Any]) -> None:
+    """Fill model and provider from the agent's tier where its file left them open (per field)."""
+    tiers = settings.get("tiers") or DEFAULT_TIERS
+    for name, spec in list(roster.agents.items()):
+        if not spec.tier:
+            continue
+        route = tiers.get(spec.tier, DEFAULT_TIERS.get(spec.tier))
+        if not route:
+            del roster.agents[name]
+            roster.problems.append(f"{name}: left out, because settings.tiers.{spec.tier} is invalid")
+            continue
+        routes = route if isinstance(route, list) else [route]
+        if len(routes) > 1 and (spec.model or spec.provider):
+            # The file pins one route; never pair its field with another route's (a hosted model name
+            # sent to a local server, or the reverse).
+            roster.agents[name] = _pin_route(spec, routes, spec.model, spec.provider)
+            continue
+        first = routes[0]
+        chain = tuple((r.get("provider"), r["model"]) for r in routes) if len(routes) > 1 else ()
+        roster.agents[name] = replace(spec, model=spec.model or first.get("model"),
+                                      provider=spec.provider or first.get("provider"), routes=chain)
+
+
+def _pin_route(spec: AgentSpec, routes: list, model: str | None, provider: str | None) -> AgentSpec:
+    """One route from a pinned field: the other field comes from the first route that agrees with it,
+    else stays open (provider: the provider setting or the lead; model: the lead's)."""
+    if model and not provider:
+        provider = next((r.get("provider") for r in routes if r["model"] == model), None)
+    elif provider and not model:
+        model = next((r["model"] for r in routes if r.get("provider") == provider), None)
+    return replace(spec, model=model, provider=provider, routes=())
+
+
 def _apply_overrides(roster: Roster, settings: Mapping[str, Any]) -> None:
+    _apply_tiers(roster, settings)  # precedence: override > agent file > tier > plugin provider > lead
     for name, override in (settings.get("overrides") or {}).items():
         if name not in roster.agents:
             roster.problems.append(f"overrides.{name}: no agent with that name")
@@ -427,6 +548,8 @@ def _apply_overrides(roster: Roster, settings: Mapping[str, Any]) -> None:
                     changes["model"] = _check_model(text)
                 elif key == "provider":
                     changes["provider"] = _check_provider(text)
+                if key in ("model", "provider"):
+                    changes["routes"] = ()  # an override pins one route
                 elif key == "effort":
                     changes["effort"] = _check_effort(text)
                 elif key != "enabled":
@@ -434,12 +557,19 @@ def _apply_overrides(roster: Roster, settings: Mapping[str, Any]) -> None:
         except ValueError as exc:
             roster.problems.append(f"overrides.{name}: {exc}")
             continue
+        routes = roster.agents[name].routes  # the tier's chain, before this override
+        if routes and ("model" in changes) != ("provider" in changes):
+            pinned = [{"provider": p, "model": m} for p, m in routes]
+            changes.pop("routes", None)
+            roster.agents[name] = _pin_route(replace(roster.agents[name], **changes), pinned,
+                                             changes.get("model"), changes.get("provider"))
+            continue
         roster.agents[name] = replace(roster.agents[name], **changes)
     default_provider = settings.get("provider") or None
     if default_provider:
         for name, spec in list(roster.agents.items()):
-            if spec.provider is None:
-                roster.agents[name] = replace(spec, provider=default_provider)
+            routes = tuple((p or default_provider, m) for p, m in spec.routes)
+            roster.agents[name] = replace(spec, provider=spec.provider or default_provider, routes=routes)
 
 
 def load_roster(settings: Mapping[str, Any], home: Path) -> Roster:
@@ -472,7 +602,7 @@ def load_roster(settings: Mapping[str, Any], home: Path) -> Roster:
 class RosterCache:
     """Reload the roster only when an agent file or a roster-relevant setting changes."""
 
-    _KEYS = ("agent_dirs", "import_claude_code_agents", "provider", "overrides")
+    _KEYS = ("agent_dirs", "import_claude_code_agents", "provider", "overrides", "tiers")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()

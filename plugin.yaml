@@ -1,20 +1,20 @@
-name: hermes-claude-agents
-version: 0.5.0
-description: "Named Claude subagents for Hermes: Opus reviews, Sonnet builds, Haiku swarms. Agents are Markdown files (the Claude Code agent format) with a fixed model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
+name: hermes-agent-crew
+version: 0.6.0
+description: "Named subagents for Hermes on any provider, local models included: strong models review, balanced models build, fast models swarm. The lead is the session's own model. Agents are Markdown files (the Claude Code agent format) with a fixed tier or model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone
 manifest_version: 2
 api_version: 1
 requires_hermes: ">=0.21.6"
 license: MIT
-homepage: https://github.com/seppegadeyne/hermes-claude-agents
-tags: [delegation, subagents, claude, orchestration]
+homepage: https://github.com/seppegadeyne/hermes-agent-crew
+tags: [delegation, subagents, orchestration, local-models, multi-provider]
 config_schema:
   provider:
     type: str
     default: claude-subscription-directsdk-experimental
     label: Agent provider
-    description: Provider the agents run on unless an agent file names its own. Use inherit to run them on the lead agent's provider.
+    description: Provider the agents run on unless an agent file, a tier or an override names its own. Use inherit to run them on the lead agent's provider.
   agent_dirs:
     type: list
     default: ["{hermes_home}/claude-agents"]
@@ -30,6 +30,11 @@ config_schema:
     default: {}
     label: Per-agent overrides
     description: "Change an agent without editing its file, for example {\"reviewer\": {\"model\": \"sonnet\"}, \"builder\": {\"enabled\": false}}. Keys: model, provider, effort, enabled."
+  tiers:
+    type: dict
+    default: {strong: {model: opus}, balanced: {model: sonnet}, fast: {model: haiku}}
+    label: Model tiers
+    description: "What runs each tier the agent files name (strong, balanced, fast): a model and optionally a provider, for example {\"fast\": {\"provider\": \"my-local-server\", \"model\": \"qwen\"}}. A tier without a provider uses the Agent provider setting. Local servers need at least a 64K context window."
   max_parallel:
     type: int
     default: 12

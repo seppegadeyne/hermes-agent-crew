@@ -1,4 +1,4 @@
-"""Run orchestration for hermes-claude-agents: launch, wait, collect, cancel, guard.
+"""Run orchestration for hermes-agent-crew: launch, wait, collect, cancel, guard.
 
 Children are launched through Hermes' public subagent lifecycle API, so they take the same host
 path as ``delegate_task`` children (cleanup, cost roll-up, ``/stop`` propagation, the live subagent
@@ -21,7 +21,7 @@ import uuid
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ from . import agents_git
 from .agents_config import INT_RANGES, AgentSpec, Roster, RosterCache, read_settings
 from .agents_policy import ChildPolicy, PolicyRegistry, scope_path, scopes_overlap
 
-PLUGIN_ID = "hermes-claude-agents"
+PLUGIN_ID = "hermes-agent-crew"
 MAX_GOAL_CHARS = 12_000
 MAX_CALLER_CONTEXT_CHARS = 24_000
 CONTEXT_BUDGET = 31_500          # the lifecycle API refuses a context over 32,000 characters
@@ -61,7 +61,9 @@ _SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
 _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
-ISOLATION_MESSAGE = ("hermes-claude-agents needs plugins.isolation: in_process. Inside the plugin host process "
+PROBE_TTL_UP_SECONDS = 60.0     # an endpoint that answered is trusted this long
+PROBE_TTL_DOWN_SECONDS = 15.0   # one that did not is retried sooner (a local server may be starting)
+ISOLATION_MESSAGE = ("hermes-agent-crew needs plugins.isolation: in_process. Inside the plugin host process "
                      "Hermes cannot bind a launch to the running agent turn.")
 
 
@@ -121,6 +123,7 @@ class Run:
     duration_seconds: float | None = None
     unsupported: list = field(default_factory=list)
     note: str | None = None
+    fallback: str | None = None  # routes skipped because their endpoint did not answer
     stop: dict | None = None
     cancel_requested: bool = False
     reported: bool = False
@@ -144,8 +147,9 @@ class AgentsService:
         self._admit = threading.Lock()  # serializes agents_run admission + launch
         self._runs: OrderedDict[str, Run] = OrderedDict()
         self._by_child_session: dict[str, str] = {}
-        self._intent: contextvars.ContextVar = contextvars.ContextVar("hermes_claude_agents_intent", default=None)
+        self._intent: contextvars.ContextVar = contextvars.ContextVar("hermes_agent_crew_intent", default=None)
         self._nudges: OrderedDict[str, dict] = OrderedDict()  # lead session id -> this turn's scouting count
+        self._probes: dict[str, tuple[bool, float]] = {}  # endpoint base_url -> (up, checked at)
 
     # ------------------------------------------------------------------ configuration
 
@@ -195,7 +199,7 @@ class AgentsService:
         try:
             message = policy.decide(str(tool_name or ""), args)
         except Exception:
-            message = f"hermes-claude-agents: the tool policy check for agent '{policy.agent}' failed; blocked."
+            message = f"hermes-agent-crew: the tool policy check for agent '{policy.agent}' failed; blocked."
         return {"action": "block", "message": message} if message else None
 
     def on_transform_tool_result(self, tool_name: Any = "", args: Any = None, result: Any = None, task_id: Any = "",
@@ -279,6 +283,9 @@ class AgentsService:
         tasks = self._parse_tasks(args, settings, roster)
         features = self.features()
         parent_provider = str(getattr(parent, "provider", "") or "")
+        # Probes run here, outside the admit lock; their time counts against this call's wait budget.
+        tasks = [(self._pick_route(spec, None if features["provider"] else parent_provider), task)
+                 for spec, task in tasks]
         # Admission and launch are one step: two agents_run calls at the same time must not both pass the
         # writer and live-run checks before either has tracked its runs. Launching only starts threads.
         with self._admit:
@@ -396,7 +403,7 @@ class AgentsService:
         if len(raw) > settings["max_parallel"]:
             raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call; nothing was started. "
                                             "Send the rest in a second agents_run call, or merge related tasks.")
-        names = ", ".join(sorted(roster.agents)) or "none (see /claude-agents)"
+        names = ", ".join(sorted(roster.agents)) or "none (see /crew)"
         tasks = []
         for index, item in enumerate(raw):
             where = f"tasks[{index}]"
@@ -462,12 +469,64 @@ class AgentsService:
                 return path
         raise Refusal("invalid_workdir", f"{where}: workdir {raw!r} is not an existing absolute folder path.")
 
+    def _endpoint_up(self, provider: str | None) -> bool:
+        """False only for a named custom endpoint (a ``providers:`` base_url) that does not answer.
+
+        Hosted providers and provider plugins are never probed: Hermes resolves those itself.
+        """
+        if not provider:
+            return True
+        url = self.host.endpoint_url(provider)
+        if not url:
+            return True
+        now = self.clock()
+        with self._lock:
+            cached = self._probes.get(url)
+        if cached is not None:
+            up, at = cached
+            if now - at < (PROBE_TTL_UP_SECONDS if up else PROBE_TTL_DOWN_SECONDS):
+                return up
+        up = bool(self.host.endpoint_up(url))
+        with self._lock:
+            self._probes[url] = (up, now)
+        return up
+
+    def _pick_route(self, spec: AgentSpec, only_provider: str | None = None) -> AgentSpec:
+        """The agent on the first route whose endpoint answers.
+
+        A tier with several routes falls through them in order; the chosen route and the skipped ones
+        go into the run's note. With no route up, the spec keeps its first route and ``unreachable`` is
+        set, so the run fails at once with a clear error instead of hanging on a dead endpoint.
+        """
+        routes = spec.routes or ((spec.provider, spec.model),)
+        if spec.routes and only_provider is not None:
+            # A build without per-launch provider routing can only run routes on the lead's provider.
+            runnable = tuple(r for r in routes if not r[0] or r[0] == only_provider)
+            if not runnable:
+                return spec  # _launch refuses it with provider_unsupported, which explains why
+            routes = runnable
+        skipped = []
+        for provider, model in routes:
+            if self._endpoint_up(provider):
+                if not skipped:
+                    return replace(spec, provider=provider, model=model) if spec.routes else spec
+                return replace(spec, provider=provider, model=model, skipped_routes=tuple(skipped))
+            skipped.append(f"{provider}/{model}" if provider else model)
+        return replace(spec, skipped_routes=tuple(skipped), unreachable=True)
+
     def _launch(self, spec: AgentSpec, task: dict, parent: Any, parent_provider: str, session_id: str,
                 settings: dict, features: dict) -> Run:
         run = Run(run_id="ag_" + uuid.uuid4().hex[:10], agent=spec.name, owner_session_id=session_id,
                   goal=task["goal"], readonly=spec.readonly, write_scope=task.get("write_scope", ()),
                   owner_ref=_weak(parent), model=spec.model, started_at=self.wall())
         self._track(run)
+        if spec.unreachable:
+            return self._fail(run, "endpoint_unavailable",
+                              f"No route for agent '{spec.name}' is reachable: "
+                              f"{', '.join(spec.skipped_routes)} did not answer. Start the server, add a "
+                              "fallback route to its tier, or use another agent.")
+        if spec.skipped_routes:
+            run.fallback = f"{', '.join(spec.skipped_routes)} unreachable"
         kwargs: dict[str, Any] = dict(
             goal=task["goal"], context=self._compose_context(spec, task, settings), role="leaf", model=spec.model,
             correlation_id=run.run_id, metadata={"plugin": PLUGIN_ID, "agent": spec.name, "run_id": run.run_id})
@@ -711,6 +770,8 @@ class AgentsService:
                                 "goal": clip(" ".join(run.goal.split()), 100)}
         if run.model:
             item["model"] = run.model
+        if run.provider:
+            item["provider"] = run.provider
         if run.readonly:
             item["readonly"] = True
         if run.status == "running":
@@ -729,6 +790,8 @@ class AgentsService:
             item["unsupported"] = list(run.unsupported)
         if run.note:
             item["note"] = run.note
+        if run.fallback:
+            item["fallback"] = run.fallback
         return item
 
     def _report(self, runs: list, settings: dict, problems: list | None = None,
@@ -755,7 +818,7 @@ class AgentsService:
                 out["next"] = "Stopped waiting after an interrupt; agents that were not stopped keep working."
         notes = list(problems or [])
         if roster is not None and roster.problems:
-            notes.append(f"{len(roster.problems)} agent file problem(s); /claude-agents lists them.")
+            notes.append(f"{len(roster.problems)} agent file problem(s); /crew lists them.")
         if notes:
             out["config_problems"] = notes[:5]
         return out
@@ -765,14 +828,18 @@ class AgentsService:
     def roster_text(self) -> str:
         settings, problems, roster = self.config()
         features = self.features()
-        lines = [f"Claude agents ({len(roster.agents)}):" if roster.agents else "No agents configured."]
+        lines = [f"Agents ({len(roster.agents)}):" if roster.agents else "No agents configured."]
         for spec in sorted(roster.agents.values(), key=lambda s: s.name):
-            flags = [spec.model or "lead's model"]
-            if spec.provider:
-                flags.append(spec.provider)
+            flags = [model_label(spec)]
+            if spec.provider and not spec.routes:
+                flags.append(spec.provider + ("" if self._endpoint_up(spec.provider) else " [down]"))
             if spec.readonly:
                 flags.append("read-only")
             lines.append(f"  {spec.name} ({', '.join(flags)}) - {spec.description or '(no description)'}")
+            if spec.routes:
+                chain = " -> ".join(f"{p or 'lead'}/{m}" + ("" if self._endpoint_up(p) else " [down]")
+                                    for p, m in spec.routes)
+                lines.append(f"    routes (first reachable runs): {chain}")
             if spec.use_when:
                 lines.append(f"    use when: {spec.use_when}")
         lines.append("Agent folders (a later folder overrides an earlier one): " + "; ".join(roster.folders))
@@ -910,13 +977,20 @@ def is_error_result(result: str, status: Any = "") -> bool:
 
 def nudge_text(count: int, scouts: list) -> str:
     names = ", ".join(scouts[:4])
-    return (f"[hermes-claude-agents] {count} read/search calls by hand in this turn. If more lookups follow, "
+    return (f"[hermes-agent-crew] {count} read/search calls by hand in this turn. If more lookups follow, "
             f"send them to read-only agents ({names}) in ONE agents_run call, one task per question or area, "
             "and keep your own context for decisions. Keep going yourself if you are nearly done.")
 
 
+def model_label(spec: AgentSpec) -> str:
+    """What runs the agent, short: ``fast: haiku`` for a tier agent, the bare model otherwise."""
+    model = " or ".join(dict.fromkeys(m for _, m in spec.routes)) if spec.routes else (spec.model or "lead's model")
+    return f"{spec.tier}: {model}" if spec.tier else model
+
+
 def agent_label(spec: AgentSpec) -> str:
-    flags = [spec.model or "lead's model"] + (["read-only"] if spec.readonly else [])
+    # The provider stays out of this label: it is in every turn's prompt, and /crew shows it.
+    flags = [model_label(spec)] + (["read-only"] if spec.readonly else [])
     return f"{spec.name} ({', '.join(flags)})"
 
 
@@ -941,8 +1015,8 @@ def roster_line(spec: AgentSpec, description_chars: int = 90) -> str:
 
 
 _PROMPT_HEAD = [
-    "Claude agents: named subagents for token-efficient delegation. You plan, decide and verify; agents do "
-    "bounded work in their own context and return compact reports, so your context stays small.",
+    "Agents: named subagents for token-efficient delegation. You are the lead: you plan, decide and verify; "
+    "agents do bounded work in their own context and return compact reports, so your context stays small.",
     "Roster:",
 ]
 _PROMPT_TAIL = [
@@ -984,7 +1058,7 @@ def render_prompt(roster: Roster, limit: int = 3_800) -> str:
     def roster_block(shown: list[AgentSpec], description_chars: int, more: int) -> list[str]:
         block = [f"- {agent_label(spec)}: {roster_line(spec, description_chars)}" for spec in shown]
         if more:
-            block.append(f"- … {more} more (/claude-agents lists them)")
+            block.append(f"- … {more} more (/crew lists them)")
         return block
 
     block: list[str] = []
@@ -1002,7 +1076,7 @@ def render_prompt(roster: Roster, limit: int = 3_800) -> str:
 def tool_description(roster: Roster) -> str:
     agents = sorted(roster.agents.values(), key=lambda s: s.name)
     names = ", ".join(agent_label(spec) for spec in agents[:10]) or "none configured yet"
-    return ("Run named Claude subagents from the operator's roster (each has a fixed model and tool set; read-only "
+    return ("Run named subagents from the operator's roster (each has a fixed model and tool set; read-only "
             "agents cannot change anything) on self-contained tasks, in parallel, and get their compact final "
             "reports. Agents cannot see this conversation: give each task a full goal and context. Results that "
             "take longer than wait_seconds come back as run_ids for agents_status. Agents at startup: "

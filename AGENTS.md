@@ -1,3 +1,24 @@
+# Purpose
+
+The plugin exists for two goals, and every change has to serve them:
+
+1. Finish tasks faster: parallel agents, fewer round trips through the lead.
+2. Use fewer tokens, above all in the lead's context, which is the most expensive one: agents
+   read and search in their own context and hand back compact reports, never transcripts.
+
+- A change must improve at least one goal and must not make the other worse. Name the expected
+  effect in the `CHANGELOG.md` entry, and where practical check it with a live run (lead tokens,
+  wall-clock time, child `api_calls`) before you call it done.
+- Build on what exists: extend the current tools, guard and service. Do not rewrite. A new
+  feature reuses the existing launch, policy and writer checks rather than adding a parallel path.
+- Opt-in, never automatic: the lead decides when to delegate. Small tasks stay with the lead,
+  because every agent starts with an empty context.
+- Provider-neutral: the lead (orchestrator) is whatever model the Hermes session runs on, and an
+  agent can run on any provider Hermes knows, including local endpoints. Never hard-code a
+  vendor or model in code, prompts or tool descriptions; vendors appear only in agent files and
+  settings.
+- The safety rules below are not trade-offs against speed or tokens.
+
 # Development conventions
 
 - Use documented Hermes plugin surfaces only: `ctx.register_tool`, `register_hook`,

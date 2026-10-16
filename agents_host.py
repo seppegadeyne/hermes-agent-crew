@@ -15,6 +15,7 @@ from typing import Any
 
 HOST_PROCESS_ENV = "HERMES_PLUGIN_HOST_PROCESS"
 DEFAULT_TOOL_DEADLINE_SECONDS = 420.0
+PROBE_TIMEOUT_SECONDS = 2.0
 _INVALID = object()
 
 
@@ -118,6 +119,58 @@ class HermesHost:
             if seconds is not _INVALID:
                 return seconds
         return DEFAULT_TOOL_DEADLINE_SECONDS
+
+    @staticmethod
+    def endpoint_url(provider: str) -> str | None:
+        """base_url of a named custom endpoint (``providers:`` map or ``custom_providers`` list), else None.
+
+        None means "a provider Hermes resolves itself" (hosted APIs, provider plugins): not probed.
+        Hermes' own resolver comes first, so name normalization, aliases, ``enabled: false`` and names
+        shadowed by a built-in provider match what the launch will do; a plain lookup is the fallback
+        for builds where that helper moved.
+        """
+        try:
+            from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+            entry = _get_named_custom_provider(provider)
+            url = entry.get("base_url") if isinstance(entry, dict) else None
+            return url.strip() if isinstance(url, str) and url.strip() else None
+        except Exception:
+            pass
+        try:
+            from hermes_cli.config import load_config_readonly
+            config = load_config_readonly() or {}
+        except Exception:
+            return None
+        entry = None
+        providers = config.get("providers")
+        if isinstance(providers, dict):
+            entry = providers.get(provider)
+        if entry is None and isinstance(config.get("custom_providers"), list):
+            entry = next((e for e in config["custom_providers"]
+                          if isinstance(e, dict) and str(e.get("name") or "") == provider), None)
+        if not isinstance(entry, dict) or entry.get("enabled") is False:
+            return None
+        url = entry.get("api") or entry.get("url") or entry.get("base_url")  # Hermes' own key order
+        return url.strip() if isinstance(url, str) and url.strip() else None
+
+    @staticmethod
+    def endpoint_up(base_url: str, timeout: float = PROBE_TIMEOUT_SECONDS) -> bool:
+        """True when the endpoint answers HTTP below 500 (401/404 still mean the server is there).
+
+        Connection refused, a timeout or a 5xx (llama.cpp answers 503 while it loads a model) mean down.
+        """
+        import urllib.error
+        import urllib.request
+        url = base_url.rstrip("/") + "/models"
+        # No proxy: a local endpoint must be reached directly, never through HTTP(S)_PROXY.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(urllib.request.Request(url, method="GET"), timeout=timeout):
+                return True
+        except urllib.error.HTTPError as exc:
+            return exc.code < 500
+        except Exception:
+            return False
 
     @staticmethod
     def interrupted() -> bool:

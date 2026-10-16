@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = "hermes_claude_agents"
+PACKAGE = "hermes_agent_crew"
 DIRECT = "claude-subscription-directsdk-experimental"
 sys.dont_write_bytecode = True
 
@@ -145,6 +145,9 @@ class FakeHost:
         self.deadline = 420.0
         self.paused = False
         self.interrupt = False
+        self.endpoints = {}  # provider -> base_url of a named custom endpoint
+        self.down = set()    # base_urls that do not answer
+        self.probes = []
         self.repo = home
         self.toolsets = {
             "read_file": "file", "search_files": "file", "write_file": "file", "patch": "file",
@@ -180,6 +183,13 @@ class FakeHost:
     def tool_deadline(self):
         return self.deadline
 
+    def endpoint_url(self, provider):
+        return self.endpoints.get(provider)
+
+    def endpoint_up(self, base_url, timeout=2.0):
+        self.probes.append(base_url)
+        return base_url not in self.down
+
     def interrupted(self):
         return self.interrupt
 
@@ -197,7 +207,7 @@ def plugin():
 
 @pytest.fixture
 def rig(plugin, hermes_home):
-    from hermes_claude_agents.agents_service import AgentsService
+    from hermes_agent_crew.agents_service import AgentsService
 
     clock = Clock()
     host = FakeHost(hermes_home)

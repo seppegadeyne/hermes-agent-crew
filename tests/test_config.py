@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_claude_agents import agents_config as cfg
+from hermes_agent_crew import agents_config as cfg
 
 CLAUDE_CODE_AGENT = """---
 name: code-reviewer
@@ -157,3 +157,113 @@ def test_roster_cache_reloads_when_a_file_changes(hermes_home):
     write(hermes_home / "claude-agents", "tester.md", "---\nname: tester\nmodel: haiku\n---\nTest.")
     second = cache.get(settings, hermes_home)
     assert second is not first and "tester" in second.agents
+
+
+DIRECT = cfg.DEFAULT_PROVIDER
+
+
+def test_builtin_agents_use_tiers_and_default_to_todays_models(hermes_home):
+    settings, problems = defaults()
+    assert not problems
+    roster = cfg.load_roster(settings, hermes_home)
+    routes = {name: (spec.tier, spec.model, spec.provider) for name, spec in roster.agents.items()}
+    assert routes == {"reviewer": ("strong", "opus", DIRECT), "builder": ("balanced", "sonnet", DIRECT),
+                      "explorer": ("fast", "haiku", DIRECT), "researcher": ("fast", "haiku", DIRECT)}
+
+
+def test_default_tiers_keep_provider_inherit(hermes_home):
+    settings, _ = defaults({"provider": "inherit"})
+    roster = cfg.load_roster(settings, hermes_home)
+    assert roster.agents["explorer"].model == "haiku" and roster.agents["explorer"].provider is None
+
+
+def test_a_tier_can_move_to_another_provider(hermes_home):
+    settings, problems = defaults({"tiers": {"fast": {"provider": "strata-qwen", "model": "strata"}}})
+    assert not problems
+    roster = cfg.load_roster(settings, hermes_home)
+    assert (roster.agents["explorer"].model, roster.agents["explorer"].provider) == ("strata", "strata-qwen")
+    assert (roster.agents["reviewer"].model, roster.agents["reviewer"].provider) == ("opus", DIRECT)
+
+
+def test_tier_fields_resolve_one_at_a_time(hermes_home):
+    write(hermes_home / "claude-agents", "local.md",
+          "---\nname: local\ntier: fast\nprovider: my-local\nreadonly: true\n---\nScout.")
+    settings, _ = defaults({"overrides": {"explorer": {"model": "haiku-next"}}})
+    roster = cfg.load_roster(settings, hermes_home)
+    assert (roster.agents["local"].model, roster.agents["local"].provider) == ("haiku", "my-local")
+    assert (roster.agents["explorer"].model, roster.agents["explorer"].provider) == ("haiku-next", DIRECT)
+
+
+def test_a_file_model_ignores_its_tier(hermes_home):
+    write(hermes_home / "claude-agents", "pinned.md", "---\nname: pinned\ntier: strong\nmodel: mine\n---\nX.")
+    settings, _ = defaults({"tiers": {"strong": {"model": "other"}}})
+    assert cfg.load_roster(settings, hermes_home).agents["pinned"].model == "mine"
+
+
+def test_bad_tiers_are_problems_not_crashes(hermes_home):
+    write(hermes_home / "claude-agents", "odd.md", "---\nname: odd\ntier: huge\n---\nX.")
+    settings, problems = defaults({"tiers": {"fast": {"provider": "x"}, "giant": {"model": "m"},
+                                             "strong": "opus", "balanced": {"model": "s", "url": "u"}}})
+    assert settings["tiers"] == {"strong": {}, "balanced": {}, "fast": {}}
+    assert len(problems) == 4 and any("needs a model" in p for p in problems)
+    roster = cfg.load_roster(settings, hermes_home)
+    assert "odd" not in roster.agents and any("odd.md" in p and "tier" in p for p in roster.problems)
+    # An invalid mapping never falls back to the default (possibly paid) route: its agents are left out.
+    assert set(roster.agents) == set()
+    assert any("explorer: left out" in p and "tiers.fast" in p for p in roster.problems)
+    _, problems = defaults({"tiers": ["fast"]})
+    assert any("settings.tiers must be a mapping" in p for p in problems)
+
+
+def test_roster_cache_reloads_when_tiers_change(hermes_home):
+    cache = cfg.RosterCache()
+    settings, _ = defaults()
+    first = cache.get(settings, hermes_home)
+    settings, _ = defaults({"tiers": {"fast": {"model": "strata", "provider": "strata-qwen"}}})
+    second = cache.get(settings, hermes_home)
+    assert second is not first and second.agents["explorer"].model == "strata"
+
+
+@pytest.mark.parametrize("key", ["model", "provider"])
+def test_tier_with_explicit_inherit_is_a_problem(hermes_home, key):
+    write(hermes_home / "claude-agents", "mixed.md", f"---\nname: mixed\ntier: fast\n{key}: inherit\n---\nX.")
+    roster = cfg.load_roster(defaults()[0], hermes_home)
+    assert "mixed" not in roster.agents
+    assert any("mixed.md" in p and f"{key}: inherit" in p for p in roster.problems)
+
+
+def test_override_model_inherit_beats_the_tier(hermes_home):
+    roster = cfg.load_roster(defaults({"overrides": {"explorer": {"model": "inherit"}}})[0], hermes_home)
+    assert roster.agents["explorer"].model is None  # the lead's model
+
+
+def test_a_tier_can_list_fallback_routes(hermes_home):
+    settings, problems = defaults({"tiers": {"fast": [{"provider": "strata-qwen", "model": "strata"},
+                                                      {"model": "haiku"}]}})
+    assert not problems
+    roster = cfg.load_roster(settings, hermes_home)
+    explorer = roster.agents["explorer"]
+    assert (explorer.provider, explorer.model) == ("strata-qwen", "strata")
+    assert explorer.routes == (("strata-qwen", "strata"), (DIRECT, "haiku"))  # route 2 takes the plugin provider
+    pinned = cfg.load_roster(defaults({"tiers": settings["tiers"],
+                                       "overrides": {"explorer": {"model": "haiku"}}})[0], hermes_home)
+    explorer = pinned.agents["explorer"]  # an override pins one route, from the route that agrees with it
+    assert (explorer.provider, explorer.model, explorer.routes) == (DIRECT, "haiku", ())
+    local = cfg.load_roster(defaults({"tiers": settings["tiers"],
+                                      "overrides": {"explorer": {"provider": "strata-qwen"}}})[0], hermes_home)
+    assert (local.agents["explorer"].provider, local.agents["explorer"].model) == ("strata-qwen", "strata")
+
+
+def test_a_file_pinning_one_field_never_mixes_routes(hermes_home):
+    write(hermes_home / "claude-agents", "scout.md", "---\nname: scout\ntier: fast\nmodel: haiku\n---\nX.")
+    write(hermes_home / "claude-agents", "local.md", "---\nname: local\ntier: fast\nprovider: my-gpu\n---\nX.")
+    settings, _ = defaults({"tiers": {"fast": [{"provider": "strata-qwen", "model": "strata"}, {"model": "haiku"}]}})
+    roster = cfg.load_roster(settings, hermes_home)
+    assert (roster.agents["scout"].provider, roster.agents["scout"].model) == (DIRECT, "haiku")
+    assert (roster.agents["local"].provider, roster.agents["local"].model) == ("my-gpu", None)
+
+
+def test_bad_route_lists_are_problems(hermes_home):
+    for bad in ([], [{"model": "a"}] * 5, [{"model": "a"}, {"provider": "x"}]):
+        settings, problems = defaults({"tiers": {"fast": bad}})
+        assert settings["tiers"]["fast"] == {} and problems

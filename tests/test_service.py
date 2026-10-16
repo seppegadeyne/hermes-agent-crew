@@ -293,6 +293,17 @@ def test_per_launch_provider_when_the_build_supports_it(rig):
     request = rig.lifecycle.requests[0]
     assert (request.provider, request.model, request.reasoning_effort) == (DIRECT, "haiku", "low")
     assert out["results"][0]["status"] == "succeeded"
+    assert out["results"][0]["provider"] == DIRECT  # the result says where the agent ran
+
+
+def test_a_remapped_tier_launches_on_its_own_provider(rig):
+    rig.host.fields = rig.host.fields | {"provider"}
+    rig.host.settings = {"tiers": {"fast": {"provider": "strata-qwen", "model": "strata"}}}
+    finish_on_sleep(rig)
+    out = run(rig, [{"agent": "explorer", "goal": "x"}, {"agent": "reviewer", "goal": "y"}])
+    routes = [(r.provider, r.model) for r in rig.lifecycle.requests]
+    assert routes == [("strata-qwen", "strata"), (DIRECT, "opus")]
+    assert [r["provider"] for r in out["results"]] == ["strata-qwen", DIRECT]
 
 
 def test_inherited_model_on_another_provider_is_refused(rig):
@@ -317,6 +328,8 @@ def test_inherit_provider_runs_on_the_lead_route(rig):
     rig.host.parent_agent.provider = "zai"
     run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
     assert not hasattr(rig.lifecycle.requests[0], "provider") and rig.lifecycle.requests[0].model == "haiku"
+    out = rig.service.status({"wait_seconds": 0}, "lead-1")
+    assert out["results"][0]["provider"] == "lead-provider"  # the route Hermes picked, from the handle
 
 
 def test_effort_is_reported_when_unsupported(rig):
@@ -347,7 +360,7 @@ def test_unknown_handle_falls_back_to_the_stop_hook(rig):
 
 
 def test_attach_diff_puts_the_snapshot_in_the_child_context(rig, monkeypatch):
-    from hermes_claude_agents import agents_git
+    from hermes_agent_crew import agents_git
     seen = {}
 
     def collect(cwd, base, budget):
@@ -361,7 +374,7 @@ def test_attach_diff_puts_the_snapshot_in_the_child_context(rig, monkeypatch):
 
 
 def test_workdir_scopes_the_agent_and_the_diff(rig, monkeypatch, tmp_path):
-    from hermes_claude_agents import agents_git
+    from hermes_agent_crew import agents_git
     repo = tmp_path / "repo"
     repo.mkdir()
     seen = {}
@@ -373,7 +386,7 @@ def test_workdir_scopes_the_agent_and_the_diff(rig, monkeypatch, tmp_path):
 
 
 def test_without_workdir_the_session_folder_is_used(rig, monkeypatch):
-    from hermes_claude_agents import agents_git
+    from hermes_agent_crew import agents_git
     seen = {}
     monkeypatch.setattr(agents_git, "collect", lambda cwd, base, budget: seen.setdefault("cwd", cwd) and "+x")
     run(rig, [{"agent": "reviewer", "goal": "done check", "attach_diff": True}], wait_seconds=0)
@@ -404,7 +417,7 @@ def test_report_budget_shrinks_with_many_results(rig):
 
 def test_prompt_section(rig):
     text = rig.service.prompt_section({})
-    assert "agents_run" in text and "reviewer (opus, read-only)" in text and "explorer (haiku, read-only)" in text
+    assert "agents_run" in text and "reviewer (strong: opus, read-only)" in text and "explorer (fast: haiku, read-only)" in text
     assert "tool_call" in text and len(text) <= 3_800
     rig.host.settings = {"prompt_section": False}
     assert rig.service.prompt_section({}) == ""
@@ -442,12 +455,12 @@ def test_a_full_roster_keeps_every_trigger_and_the_usage_guide(rig):
         assert marker in text
     shown = [line for line in text.splitlines() if line.startswith("- worker-")]
     assert shown and all("t" * 185 in line for line in shown)
-    assert "more (/claude-agents lists them)" in text
+    assert "more (/crew lists them)" in text
 
 
 def test_trigger_phrasing():
-    from hermes_claude_agents.agents_config import AgentSpec
-    from hermes_claude_agents.agents_service import roster_line
+    from hermes_agent_crew.agents_config import AgentSpec
+    from hermes_agent_crew.agents_service import roster_line
     assert roster_line(AgentSpec(name="a", use_when="when a file needs checks…")) == "Use when a file needs checks."
     assert roster_line(AgentSpec(name="a", use_when="Use for X.", description="D")) == "Use for X. D"
 
@@ -456,7 +469,7 @@ def test_roster_text_lists_agents_and_problems(rig):
     (rig.home / "claude-agents").mkdir()
     (rig.home / "claude-agents" / "bad.md").write_text("---\nname: BAD\n---\n")
     text = rig.service.roster_text()
-    assert "reviewer (opus, claude-subscription-directsdk-experimental, read-only)" in text
+    assert "reviewer (strong: opus, claude-subscription-directsdk-experimental, read-only)" in text
     assert "problem:" in text and "bad.md" in text
 
 
@@ -470,7 +483,7 @@ def test_nudge_fires_once_after_a_run_of_manual_scouting(rig):
         assert lead_result(rig, "read_file") is None
     assert lead_result(rig, "write_file") is None  # edits do not count
     hinted = lead_result(rig, "terminal", {"command": "cd /repo && grep -n foo src/*.py"})
-    assert hinted.startswith('{"content": "x"}\n\n[hermes-claude-agents] 8 read/search calls')
+    assert hinted.startswith('{"content": "x"}\n\n[hermes-agent-crew] 8 read/search calls')
     assert "explorer" in hinted and "agents_run" in hinted and "builder" not in hinted
     assert lead_result(rig, "read_file") is None  # once per turn
     for _ in range(7):
@@ -507,8 +520,8 @@ def test_nudge_never_raises_and_ignores_odd_input(rig):
 
 
 def test_schema_allows_what_the_settings_allow(plugin):
-    from hermes_claude_agents.agents_config import INT_RANGES
-    from hermes_claude_agents.agents_tools import schema
+    from hermes_agent_crew.agents_config import INT_RANGES
+    from hermes_agent_crew.agents_tools import schema
     assert schema("agents_run")["parameters"]["properties"]["tasks"]["maxItems"] == INT_RANGES["max_parallel"][1]
 
 
@@ -526,7 +539,7 @@ def test_nudge_leaves_script_and_error_results_alone(rig):
 
 
 def test_scouting_commands():
-    from hermes_claude_agents.agents_service import is_read_command
+    from hermes_agent_crew.agents_service import is_read_command
     reads = ("grep -rn foo src 2>/dev/null", "cd /r && git log --oneline -5 2>&1", "sed -n 1,40p a.py",
              "find . -name '*.py' | head", "ls -la; wc -l *.py", "grep -n 'cp' a.py", "grep 'a>b' notes.md",
              "grep -n \"rm -rf\" deploy.sh", "git -C /r diff --stat", "git branch -a", "cat a.py | sort | uniq -c",
@@ -545,7 +558,7 @@ def test_scouting_commands():
 
 
 def test_error_results_get_no_hint():
-    from hermes_claude_agents.agents_service import is_error_result
+    from hermes_agent_crew.agents_service import is_error_result
     for result in ('{"error": "x"}', '{"success": false, "message": "x"}', '{"ok": false}',
                    ' {"output": "", "error": "boom", "exit_code": 1}'):
         assert is_error_result(result), result
@@ -560,3 +573,141 @@ def test_nudge_skips_success_false_results(rig):
         lead_result(rig, "read_file")
     assert lead_result(rig, "web_extract", result='{"success": false, "message": "403"}') is None
     assert lead_result(rig, "read_file") is not None
+
+
+VENDOR_WORDS = ("claude", "opus", "sonnet", "haiku", "anthropic")
+
+
+def test_plugin_text_is_vendor_neutral(rig, plugin):
+    """Vendor and model names come only from agent files and settings, never from the plugin's own text."""
+    import re
+
+    from hermes_agent_crew import agents_service, agents_tools
+    from hermes_agent_crew.agents_config import DEFAULT_PROVIDER, DEFAULT_TIERS
+
+    _, _, roster = rig.service.config()
+    configured = {DEFAULT_PROVIDER} | {route["model"] for route in DEFAULT_TIERS.values()}
+
+    def own_words(text):
+        for value in configured:
+            text = text.replace(value, "")
+        for folder in roster.folders:  # paths are the operator's (or the checkout's) names
+            text = text.replace(folder, "")
+        text = text.replace("CLAUDE.md", "")  # a project-rules file name, not a vendor claim
+        return [w for w in VENDOR_WORDS if re.search(rf"\b{w}\b", text, re.I)]
+
+    texts = {
+        "prompt": agents_service.render_prompt(roster),
+        "tool description": agents_service.tool_description(roster),
+        "nudge": agents_service.nudge_text(8, ["explorer"]),
+        "roster": rig.service.roster_text(),
+        "status schema": str(agents_tools.schema("agents_status")),
+        "run schema": str(agents_tools.schema("agents_run")),
+    }
+    texts.update({f"agent file {name}": spec.description + spec.use_when + spec.instructions
+                  for name, spec in roster.agents.items()})
+    assert own_words("Run named Claude subagents (Opus)") == ["claude", "opus"]  # the check bites
+    assert {name: own_words(text) for name, text in texts.items() if own_words(text)} == {}
+
+
+LOCAL_TIERS = {"tiers": {"fast": [{"provider": "strata-qwen", "model": "strata"}, {"model": "haiku"}]}}
+
+
+def test_fallback_route_when_the_local_endpoint_is_down(rig):
+    rig.host.fields = rig.host.fields | {"provider"}
+    rig.host.settings = LOCAL_TIERS
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    rig.host.down = {"http://127.0.0.1:8081/v1"}
+    finish_on_sleep(rig)
+    finish_on_sleep(rig, 1)
+    out = run(rig, [{"agent": "explorer", "goal": "x"}, {"agent": "researcher", "goal": "y"}])
+    assert [(r.provider, r.model) for r in rig.lifecycle.requests] == [(DIRECT, "haiku")] * 2
+    assert all(r["status"] == "succeeded" and r["fallback"] == "strata-qwen/strata unreachable"
+               for r in out["results"])
+    assert rig.host.probes == ["http://127.0.0.1:8081/v1"]  # cached: one probe for both tasks
+
+
+def test_local_route_wins_when_it_answers(rig):
+    rig.host.fields = rig.host.fields | {"provider"}
+    rig.host.settings = LOCAL_TIERS
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    finish_on_sleep(rig)
+    out = run(rig, [{"agent": "explorer", "goal": "x"}])
+    assert (rig.lifecycle.requests[0].provider, rig.lifecycle.requests[0].model) == ("strata-qwen", "strata")
+    assert "fallback" not in out["results"][0]
+    rig.host.down = {"http://127.0.0.1:8081/v1"}  # goes down within the 60 s up-cache: still trusted
+    rig.clock.now += 30
+    run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
+    assert rig.lifecycle.requests[-1].provider == "strata-qwen" and len(rig.host.probes) == 1
+    rig.clock.now += 31
+    run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
+    assert rig.lifecycle.requests[-1].model == "haiku" and len(rig.host.probes) == 2
+
+
+def test_the_fallback_survives_other_notes(rig):
+    rig.host.fields = rig.host.fields | {"provider"}
+    rig.host.settings = LOCAL_TIERS
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    rig.host.down = {"http://127.0.0.1:8081/v1"}
+    rig.host.parent_agent.enabled_toolsets = ["file", "web"]
+    real = rig.lifecycle.launch
+    calls = []
+
+    def picky(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise ValueError("unknown toolsets requested")
+        return real(request)
+
+    rig.lifecycle.launch = picky
+    out = run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
+    result = out["results"][0]
+    assert result["note"] == "toolsets_not_narrowed" and result["fallback"] == "strata-qwen/strata unreachable"
+
+
+def test_old_builds_skip_routes_on_other_providers(rig):
+    rig.host.settings = LOCAL_TIERS  # no "provider" in rig.host.fields: routes must stay on the lead's provider
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    finish_on_sleep(rig)
+    out = run(rig, [{"agent": "explorer", "goal": "x"}])
+    assert out["results"][0]["status"] == "succeeded" and rig.lifecycle.requests[0].model == "haiku"
+    assert rig.host.probes == []  # the unrunnable local route was not even probed
+
+
+def test_a_down_probe_is_retried_after_its_ttl(rig):
+    rig.host.fields = rig.host.fields | {"provider"}
+    rig.host.settings = LOCAL_TIERS
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    rig.host.down = {"http://127.0.0.1:8081/v1"}
+    run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
+    rig.host.down = set()  # the server came up
+    rig.clock.now += 16
+    run(rig, [{"agent": "explorer", "goal": "x"}], wait_seconds=0)
+    assert rig.lifecycle.requests[-1].provider == "strata-qwen" and len(rig.host.probes) == 2
+
+
+def test_single_local_route_down_fails_fast_without_launching(rig):
+    rig.host.fields = rig.host.fields | {"provider"}
+    rig.host.settings = {"tiers": {"fast": {"provider": "strata-qwen", "model": "strata"}}}
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    rig.host.down = {"http://127.0.0.1:8081/v1"}
+    out = run(rig, [{"agent": "explorer", "goal": "x"}, {"agent": "reviewer", "goal": "y"}])
+    explorer, reviewer = out["results"]
+    assert explorer["status"] == "failed" and explorer["note"] == "endpoint_unavailable"
+    assert "strata-qwen/strata did not answer" in explorer["error"] and "fallback route" in explorer["error"]
+    assert [r.model for r in rig.lifecycle.requests] == ["opus"]  # the reviewer still ran
+
+
+def test_hosted_providers_are_never_probed(rig):
+    finish_on_sleep(rig)
+    run(rig, [{"agent": "explorer", "goal": "x"}])
+    assert rig.host.probes == []
+
+
+def test_roster_text_shows_routes_and_their_state(rig):
+    rig.host.settings = LOCAL_TIERS
+    rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
+    rig.host.down = {"http://127.0.0.1:8081/v1"}
+    text = rig.service.roster_text()
+    assert "explorer (fast: strata or haiku, read-only)" in text
+    assert f"routes (first reachable runs): strata-qwen/strata [down] -> {DIRECT}/haiku" in text
