@@ -430,3 +430,155 @@ def test_a_failed_fix_marks_each_item_by_its_own_run(rig):
 def test_status_without_args_lists_a_running_plan(rig):
     plan_id = run_plan(rig, wait_seconds=0)["plan"]["plan_id"]
     assert rig.service.status({}, "lead-1")["plans_running"] == [plan_id]
+
+
+# --------------------------------------------------------------------------- 0.8.0: fix loop, grouping, plan hint
+
+def test_parse_result_and_retry_validation():
+    assert ap.parse_result(block({"result": "failed", "reason": "test_x red"})) == ("failed", "test_x red")
+    assert ap.parse_result(block({"result": "done"})) == ("done", "")
+    assert ap.parse_result("no block")[0] is None
+    for bad in (3, -1, True, "1"):
+        with pytest.raises(ap.PlanError):
+            ap.parse_plan({"stages": [{"name": "a", "agent": "x", "goal": "g"},
+                                      {"name": "b", "agent": "x", "goal": "g", "for_each": "a", "retry": bad}]}, 24)
+
+
+FIX = [{"name": "scan", "agent": "explorer", "goal": "g"},
+       {"name": "fix", "agent": "builder", "goal": "Fix it.", "for_each": "scan", "retry": 2}]
+
+
+def one_item(rig):
+    return block({"items": [{"title": "a", "files": [str(rig.home / "a.py")]}]})
+
+
+def test_a_failed_fix_gets_another_attempt_with_its_report(rig):
+    def answers(index, request):
+        if request.metadata["agent"] == "explorer":
+            return one_item(rig)
+        if "Previous attempt" in request.context:
+            assert "## Previous attempt" in request.context and "test_a still red" in request.context
+            return block({"result": "done"})
+        assert '"result": "done" | "failed"' in request.context
+        return block({"result": "failed", "reason": "test_a still red"})
+    driver(rig, answers)
+    plan = run_plan(rig, FIX)["plan"]
+    assert plan["status"] == "succeeded", plan
+    assert plan["items"] == [{"id": "scan-1", "title": "a", "status": "fix: done", "attempts": 2}]
+    assert plan["stages"][1]["retried"] == 1 and plan["stages"][1]["runs"] == 2
+    trail = rig.service.status({"plan_id": plan["plan_id"], "item": "scan-1"}, "lead-1")["item"]["trail"]
+    assert [t["status"] for t in trail] == ["succeeded", "retry", "succeeded"]
+
+
+def test_retry_stops_when_it_fails_the_same_way(rig):
+    driver(rig, lambda i, r: one_item(rig) if r.metadata["agent"] == "explorer"
+           else block({"result": "failed", "reason": "same error"}))
+    plan = run_plan(rig, FIX)["plan"]
+    builders = [r for r in rig.lifecycle.requests if r.metadata["agent"] == "builder"]
+    assert len(builders) == 2  # one retry, then no progress: stop
+    assert plan["status"] == "failed" and "failed the same way" in plan["error"]
+    assert plan["items"][0]["status"] == "fix: failed"
+
+
+def test_retry_is_bounded(rig):
+    counter = iter(range(100))
+    driver(rig, lambda i, r: one_item(rig) if r.metadata["agent"] == "explorer"
+           else block({"result": "failed", "reason": f"error {next(counter)}"}))
+    plan = run_plan(rig, FIX)["plan"]
+    assert sum(1 for r in rig.lifecycle.requests if r.metadata["agent"] == "builder") == 3  # 1 + retry 2
+    assert plan["status"] == "failed"
+
+
+def test_without_retry_a_reported_failure_is_not_retried(rig):
+    driver(rig, lambda i, r: one_item(rig) if r.metadata["agent"] == "explorer"
+           else block({"result": "failed", "reason": "x"}))
+    plan = run_plan(rig, [FIX[0], {**FIX[1], "retry": 0}])["plan"]
+    assert plan["status"] == "succeeded"  # without retry the block is not asked for or read
+    assert sum(1 for r in rig.lifecycle.requests if r.metadata["agent"] == "builder") == 1
+
+
+def test_items_in_the_same_file_go_to_one_builder(rig):
+    a, b = str(rig.home / "a.py"), str(rig.home / "b.py")
+
+    def answers(index, request):
+        if request.metadata["agent"] == "explorer":
+            return block({"items": [{"title": "a1", "files": [a]}, {"title": "b1", "files": [b]},
+                                    {"title": "a2", "files": [a]}, {"title": "ab", "files": [b, str(rig.home / "c.py")]}]})
+        return None
+    driver(rig, answers)
+    out = run_plan(rig, [FIX[0], {"name": "fix", "agent": "builder", "goal": "f", "for_each": "scan"}], wait_seconds=30)
+    builders = [r for r in rig.lifecycle.requests if r.metadata["agent"] == "builder"]
+    assert len(builders) == 2, out  # {a1, a2} and {b1, ab}: both at once, no waiting on each other
+    contexts = sorted(r.context.split("## Items")[1].split("## Rules")[0] for r in builders)
+    assert '"a1"' in contexts[0] and '"a2"' in contexts[0] and '"b1"' in contexts[1] and '"ab"' in contexts[1]
+
+
+def lead_turn(rig, tool, args, result, turn="t1"):
+    return rig.service.on_transform_tool_result(tool_name=tool, args=args, result=result, task_id="lead",
+                                                session_id="lead-1", turn_id=turn)
+
+
+def test_plan_hint_after_the_second_chained_fan_out(rig):
+    three = json.dumps({"ok": True, "results": [{"summary": "r"}] * 3})
+    two = json.dumps({"ok": True, "results": [{"summary": "r"}] * 2})
+    args = {"tasks": [{"agent": "explorer", "goal": "x"}]}
+    assert lead_turn(rig, "agents_run", args, two) is None
+    assert lead_turn(rig, "agents_run", args, three) is None       # first fan-out
+    hinted = lead_turn(rig, "agents_run", args, three)             # second: hint
+    assert hinted.startswith(three) and "one plan" in hinted
+    assert lead_turn(rig, "agents_run", args, three) is None       # once per turn
+    assert lead_turn(rig, "agents_run", args, three, turn="t2") is None
+    assert lead_turn(rig, "agents_run", {"plan": {}}, three, turn="t2") is None  # plans never count
+    rig.host.settings = {"nudge_after": 0}
+    assert lead_turn(rig, "agents_run", args, three, turn="t3") is None
+    assert lead_turn(rig, "agents_run", args, three, turn="t3") is None  # nudges off: no plan hint either
+
+
+def test_retry_needs_a_writer_for_each_stage(rig):
+    with pytest.raises(ap.PlanError):
+        ap.parse_plan({"stages": [{"name": "a", "agent": "x", "goal": "g", "retry": 1}]}, 24)
+    stages = [FIX[0], {"name": "look", "agent": "explorer", "goal": "g", "for_each": "scan", "retry": 1}]
+    assert run_plan(rig, stages)["error"] == "invalid_plan"
+
+
+def test_hard_failures_are_retried_but_interrupts_are_not(rig):
+    states = iter(["FAILED", "SUCCEEDED"])
+    driver(rig, lambda i, r: one_item(rig) if r.metadata["agent"] == "explorer"
+           else (next(states), block({"result": "done"})))
+    assert run_plan(rig, FIX)["plan"]["status"] == "succeeded"
+
+    rig2_states = iter(["INTERRUPTED"])
+    rig.lifecycle.requests.clear()
+    rig.lifecycle.state.clear()
+    rig.clock.on_sleep.clear()
+    driver(rig, lambda i, r: one_item(rig) if r.metadata["agent"] == "explorer" else (next(rig2_states), None))
+    plan = run_plan(rig, FIX)["plan"]
+    assert plan["status"] == "failed"
+    assert sum(1 for r in rig.lifecycle.requests if r.metadata["agent"] == "builder") == 1
+
+
+def test_a_hard_failure_in_the_stage_drops_queued_retries(rig):
+    a, b = str(rig.home / "a.py"), str(rig.home / "b.py")
+
+    def answers(index, request):
+        if request.metadata["agent"] == "explorer":
+            return block({"items": [{"title": "a", "files": [a]}, {"title": "b", "files": [b]}]})
+        if '"a"' in request.context.split("## Rules")[0]:
+            return block({"result": "failed", "reason": "red"})
+        return ("INTERRUPTED", None)
+    driver(rig, answers)
+    plan = run_plan(rig, FIX)["plan"]
+    assert plan["status"] == "failed"
+    statuses = {i["title"]: i["status"] for i in plan["items"]}
+    assert statuses["b"] == "fix: failed" and statuses["a"] in ("fix: failed", "fix: not run")
+    assert sum(1 for r in rig.lifecycle.requests if r.metadata["agent"] == "builder") == 2
+
+
+def test_attempts_count_per_stage(rig):
+    outcomes = iter([block({"result": "failed", "reason": "x"}), block({"result": "done"}),
+                     block({"result": "failed", "reason": "x"}), block({"result": "done"})])
+    driver(rig, lambda i, r: one_item(rig) if r.metadata["agent"] == "explorer" else next(outcomes))
+    stages = FIX + [{"name": "polish", "agent": "builder", "goal": "p", "for_each": "fix", "retry": 1}]
+    plan = run_plan(rig, stages)["plan"]
+    assert plan["status"] == "succeeded", plan  # same reason "x" in stage 2 is not "no progress"
+    assert [s.get("retried") for s in plan["stages"]] == [None, 1, 1]

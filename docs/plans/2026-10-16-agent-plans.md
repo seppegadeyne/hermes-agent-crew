@@ -435,6 +435,14 @@ Taken over from the review:
 Open from the review: whether the oldest supported Hermes compares session ids in `_record` the
 same way. The plan no longer depends on it, but Task 4's session-change test runs against both.
 
+## Built in 0.8.0
+
+- Fix loop (`retry`), with the no-progress stop.
+- Same-file grouping instead of git worktrees: worktrees need a merge step whose conflicts cost
+  another agent or lead round trip, against both goals. Revisit only if one item's fix is too big
+  for one builder.
+- Plan hint after the second chained fan-out in a turn.
+
 ## Later (not in 0.7.0)
 
 - Fix loop: a builder item that fails its tests gets one more round with the failure in context;

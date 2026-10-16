@@ -62,6 +62,7 @@ _SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
 _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
+LAUNCH_FAILURES = frozenset({"launch_failed", "endpoint_unavailable", "model_required", "provider_unsupported"})
 PLAN_REPORT_CHARS = 8_000        # the lead reads at most this much of a plan's result
 PLAN_TRAIL_CHARS = 4_000         # per run summary kept in an item's trail
 MAX_TRACKED_PLANS = 32
@@ -167,6 +168,9 @@ class Plan:
     reported: bool = False
     lock: Any = field(default_factory=threading.Lock, repr=False)  # one advancer at a time
     cancelled_runs: list = field(default_factory=list)  # still polled after a cancel, so admission frees up
+    stage_spec: Any = None           # the current stage's agent (route picked once per stage)
+    stage_template: dict = field(default_factory=dict)
+    retried: int = 0                 # retry runs launched in the current stage
 
 
 class AgentsService:
@@ -263,18 +267,23 @@ class AgentsService:
         with self._lock:
             state = self._nudges.get(session_id)
             if state is None or state["turn"] != turn_id:
-                state = {"turn": turn_id, "count": 0, "done": False}
+                state = {"turn": turn_id, "count": 0, "done": False, "fanouts": 0, "plan_hint": False}
                 self._nudges[session_id] = state
             self._nudges.move_to_end(session_id)
             while len(self._nudges) > MAX_NUDGE_SESSIONS:
                 self._nudges.popitem(last=False)
             if delegating:
                 state["done"] = True
+                plan_hint = self._count_fanout(state, tool_name, args, result)
+            elif state["done"]:
                 return None
-            if state["done"]:
-                return None
-            state["count"] += 1
+            else:
+                state["count"] += 1
             count = state["count"]
+        if delegating:
+            if not plan_hint or is_error_result(result, status) or not self.config()[0]["nudge_after"]:
+                return None
+            return result + "\n\n" + PLAN_HINT
         settings, _, roster = self.config()
         threshold = settings["nudge_after"]
         if not threshold or count < threshold or is_error_result(result, status):
@@ -287,6 +296,20 @@ class AgentsService:
                 return None
             state["done"] = True
         return result + "\n\n" + nudge_text(count, scouts)
+
+    @staticmethod
+    def _count_fanout(state: dict, tool_name: str, args: Any, result: Any) -> bool:
+        """True once per turn, at the second agents_run tasks fan-out with 3+ reports: chained calls a plan
+        would have kept out of the lead's context. Caller holds self._lock. Counting only, never blocking."""
+        if tool_name != "agents_run" or not isinstance(args, dict) or args.get("plan") is not None:
+            return False
+        if _report_count(result) < 3:
+            return False
+        state["fanouts"] += 1
+        if state["fanouts"] < 2 or state["plan_hint"]:
+            return False
+        state["plan_hint"] = True
+        return True
 
     # ------------------------------------------------------------------ tools
 
@@ -889,6 +912,9 @@ class AgentsService:
             raise Refusal(exc.code, str(exc)) from None
         for stage in parsed["stages"]:
             spec, task = self._parse_task(stage["task"], stage["where"], roster)
+            if stage["retry"] and spec.readonly:
+                raise Refusal("invalid_plan", f"{stage['where']}: retry is for writer stages, and '{spec.name}' "
+                                              "is read-only.")
             if stage["verify"] and not spec.readonly:
                 raise Refusal("invalid_plan", f"{stage['where']}: a verify stage needs a read-only agent, "
                                               f"and '{spec.name}' can change files.")
@@ -964,21 +990,33 @@ class AgentsService:
         template = dict(stage["template"])
         rules = [agents_plan.VERIFY_RULE] if stage["verify"] else \
             [agents_plan.ITEMS_RULE] if stage["produces"] else []
+        if stage["retry"]:
+            rules.append(agents_plan.RESULT_RULE)
         template["rules"] = rules
+        plan.stage_spec, plan.stage_template, plan.retried = spec, template, 0
         if stage["split"]:
             for part in stage["split"]:
                 plan.queue.append((spec, {**template, "goal": f"{template['goal']}\n\nYour part: {part}"}, []))
         elif stage["for_each"]:
             ids = [i for i in plan.outputs.get(stage["for_each"], []) if plan.items[i]["status"] != "refused_scope"]
             workdir = str(template.get("workdir") or self.host.cwd())
-            batch: list = []
+            eligible = []
             for item_id in ids:
                 item = plan.items[item_id]
                 if not spec.readonly and item["files"] and agents_plan.plan_scope(item["files"], workdir) is None:
                     item["status"], item["reason"] = "refused_scope", "files outside the workdir or too broad"
                     continue
-                batch.append(item_id)
-                if len(batch) == stage["per_run"]:
+                eligible.append(item_id)
+            # Writers: items whose files overlap go into ONE run, so fixes in the same file never wait for
+            # each other or conflict; disjoint groups still run in parallel. Groups are never split.
+            groups = self._group_by_files(plan, eligible, workdir) if not spec.readonly else [[i] for i in eligible]
+            batch: list = []
+            for group in groups:
+                if batch and len(batch) + len(group) > stage["per_run"]:
+                    plan.queue.append(self._item_task(plan, spec, template, batch, workdir))
+                    batch = []
+                batch.extend(group)
+                if len(batch) >= stage["per_run"]:
                     plan.queue.append(self._item_task(plan, spec, template, batch, workdir))
                     batch = []
             if batch:
@@ -993,12 +1031,37 @@ class AgentsService:
             return
         self._launch_wave(plan, parent, settings, features)
 
-    def _item_task(self, plan: Plan, spec: AgentSpec, template: dict, ids: list, workdir: str) -> tuple:
+    @staticmethod
+    def _group_by_files(plan: Plan, ids: list, workdir: str) -> list:
+        """Item ids grouped so that items with overlapping file scopes share a group (union-find, stable order).
+        Items without files stay on their own: their workdir-wide scope would otherwise swallow every group."""
+        scopes = {i: agents_plan.plan_scope(plan.items[i]["files"], workdir) for i in ids}
+        parent = {i: i for i in ids}
+
+        def root(i: str) -> str:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        scoped = [i for i in ids if scopes[i]]
+        for n, a in enumerate(scoped):
+            for b in scoped[n + 1:]:
+                if root(a) != root(b) and scopes_overlap(scopes[a], scopes[b]):
+                    parent[root(b)] = root(a)
+        groups: dict[str, list] = {}
+        for i in ids:
+            groups.setdefault(root(i), []).append(i)
+        return list(groups.values())
+
+    def _item_task(self, plan: Plan, spec: AgentSpec, template: dict, ids: list, workdir: str,
+                   previous: str | None = None) -> tuple:
         detail_budget = max(300, 12_000 // max(1, len(ids)))
         items = [{**agents_plan.item_view(plan.items[i]), "detail": clip(plan.items[i]["detail"], detail_budget)}
                  for i in ids]
         # Items first: _compose_context clips the caller context from the end, never the items.
         context = "## Items\n" + json.dumps(items, ensure_ascii=False, indent=1) + \
+            ("\n\n## Previous attempt (it failed; fix what it left)\n" + previous if previous else "") + \
             ("\n\n" + template["context"] if template["context"] else "")
         task = {**template, "context": context}
         if not spec.readonly:
@@ -1070,36 +1133,101 @@ class AgentsService:
                 still.append((run, ids))
             else:
                 run.reported = True
-                plan.done.append((run, ids))
+                if not self._retry(plan, run, ids):
+                    plan.done.append((run, ids))
         plan.current = still
-        if any(run.status != "succeeded" for run, _ in plan.done):
-            plan.queue = []  # a failed run fails the stage: launch nothing more, let the running ones finish
+        stage = plan.stages[plan.stage_index]
+        if any(self._run_failed(stage, run) for run, _ in plan.done):
+            # A failed run fails the stage: launch nothing more (queued retries included; their runs go
+            # back to done so their items get a final status), and let the running ones finish.
+            for retry_run_ids in [ids for _, _, ids in plan.queue if ids]:
+                for item_id in retry_run_ids:
+                    plan.items[item_id]["status"] = f"{stage['name']}: not run"
+            plan.queue = []
         if plan.queue:
             self._launch_wave(plan, parent, settings, features)
         if plan.current or plan.queue or plan.status != "running":
             return
         self._close_stage(plan, parent, settings, features)
 
+    @staticmethod
+    def _run_failed(stage: dict, run: Run) -> bool:
+        """A stage run counts as failed: it did not succeed, or (retry stages) it reported failed."""
+        return run.status != "succeeded" or bool(stage["retry"]) and \
+            agents_plan.parse_result(run.summary)[0] == "failed"
+
+    def _retry(self, plan: Plan, run: Run, ids: list) -> bool:
+        """Queue one more attempt for a failed writer run of a retry stage; True when it was queued.
+
+        Retried: a run that succeeded but reported failed (tests still red), or a run that failed while
+        working. Never retried: interrupted, cancelled or lost runs (the user stopped it, or its edits may
+        have landed), launch refusals (they fail the same way again), or a stage that already has a hard
+        failure. Stops early when the reason repeats (no progress). Attempts count per stage.
+        """
+        stage = plan.stages[plan.stage_index]
+        if not stage["retry"] or not ids or plan.stage_spec is None or plan.stage_spec.readonly:
+            return False
+        if any(self._run_failed(stage, r) for r, _ in plan.done):
+            return False  # the stage is failing anyway: do not spend another run
+        if run.status == "succeeded":
+            result, reason = agents_plan.parse_result(run.summary)
+            if result != "failed":
+                return False
+        elif run.status == "failed" and run.note not in LAUNCH_FAILURES:
+            reason = clip(run.error or "failed", 200)
+        else:
+            return False
+        reason = reason or "failed"
+        key = stage["name"]
+        items = [plan.items[i] for i in ids]
+        for item in items:
+            item.setdefault("retries", {}).setdefault(key, {"attempts": 1, "last": None})
+        if any(item["retries"][key]["attempts"] > stage["retry"] for item in items):
+            return False
+        if any(item["retries"][key]["last"] == reason for item in items):
+            for item in items:
+                item["no_progress"] = True
+            return False
+        for item in items:
+            item["retries"][key]["attempts"] += 1
+            item["retries"][key]["last"] = reason
+            item["attempts"] = item["retries"][key]["attempts"]
+            item["trail"].append({"stage": stage["name"], "run_id": run.run_id, "status": "retry",
+                                  "summary": clip(run.summary or run.error or "", PLAN_TRAIL_CHARS)})
+        workdir = str(plan.stage_template.get("workdir") or self.host.cwd())
+        previous = clip(run.summary or run.error or reason, 3_000)
+        plan.queue.append(self._item_task(plan, plan.stage_spec, plan.stage_template, ids, workdir, previous))
+        plan.retried += 1
+        return True
+
     def _close_stage(self, plan: Plan, parent: Any, settings: dict, features: dict) -> None:
         stage = plan.stages[plan.stage_index]
         name, done = stage["name"], plan.done
-        stat: dict[str, Any] = {"name": name, "runs": len(done),
+        stat: dict[str, Any] = {"name": name, "runs": len(done) + plan.retried,
                                 "seconds": round(self.clock() - plan.stage_started, 1)}
+        if plan.retried:
+            stat["retried"] = plan.retried
         for run, ids in done:
             for item_id in ids:
                 plan.items[item_id]["trail"].append(
                     {"stage": name, "run_id": run.run_id, "status": run.status,
                      "summary": clip(run.summary or run.error or "", PLAN_TRAIL_CHARS)})
-        failed = [(run, ids) for run, ids in done if run.status != "succeeded"]
+        failed = [(run, ids) for run, ids in done if self._run_failed(stage, run)]
         if failed:
+            bad = {r.run_id for r, _ in failed}
             for r, ids in done:
                 for item_id in ids:
-                    plan.items[item_id]["status"] = f"{name}: done" if r.status == "succeeded" else f"{name}: failed"
+                    if plan.items[item_id]["status"] != f"{name}: not run":
+                        plan.items[item_id]["status"] = f"{name}: failed" if r.run_id in bad else f"{name}: done"
             run = failed[0][0]
+            why = agents_plan.parse_result(run.summary)[1] if run.status == "succeeded" else clip(run.error or "", 400)
+            if any(plan.items[i].get("no_progress") for _, ids in failed for i in ids):
+                why = (why + "; " if why else "") + "stopped: the retry failed the same way"
             stat["failed"] = len(failed)
             plan.stats.append(stat)
-            self._end_plan(plan, "failed", error=f"stage {name}: run {run.run_id} ({run.agent}) {run.status}: "
-                                                 f"{clip(run.error or 'no error message', 600)}")
+            verb = "reported failed" if run.status == "succeeded" else run.status
+            self._end_plan(plan, "failed", error=f"stage {name}: run {run.run_id} ({run.agent}) {verb}: "
+                                                 f"{clip(why or run.error or 'no error message', 600)}")
             return
         if stage["produces"]:
             found, seen = [], set()
@@ -1214,6 +1342,8 @@ class AgentsService:
         items = []
         for item in plan.items.values():
             line = {"id": item["id"], "title": clip(item["title"], 200), "status": item["status"]}
+            if item.get("attempts", 1) > 1:
+                line["attempts"] = item["attempts"]
             if item.get("reason"):
                 line["reason"] = clip(item["reason"], 200)
             items.append(line)
@@ -1402,6 +1532,23 @@ def is_error_result(result: str, status: Any = "") -> bool:
     if not isinstance(data, dict):
         return False
     return bool(data.get("error")) or data.get("success") is False or data.get("ok") is False
+
+
+PLAN_HINT = ("[hermes-agent-crew] Second fan-out of agents in this turn. If the next step again repeats per "
+             "finding, pass agents_run one plan for the remaining stages (for_each over the findings, verify, "
+             "fix with retry, check): it runs them and returns one compact result instead of every report.")
+
+
+def _report_count(result: Any) -> int:
+    """How many finished reports an agents_run result carried (0 when it is not one)."""
+    if not isinstance(result, str) or not result.startswith("{") or len(result) > 400_000:
+        return 0
+    try:
+        data = json.loads(result)
+    except ValueError:
+        return 0
+    results = data.get("results") if isinstance(data, dict) else None
+    return sum(1 for r in results if isinstance(r, dict) and r.get("summary")) if isinstance(results, list) else 0
 
 
 def nudge_text(count: int, scouts: list) -> str:

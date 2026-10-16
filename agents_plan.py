@@ -12,6 +12,7 @@ from typing import Any
 
 MAX_STAGES = 8
 MAX_PER_RUN = 8
+MAX_RETRY = 2
 MAX_SPLIT_CHARS = 2_000
 MAX_SUMMARY_PARSE_CHARS = 64_000
 MAX_ITEM_FILES = 8
@@ -20,7 +21,7 @@ MAX_DETAIL_CHARS = 2_000
 MAX_SCOPE_DEPTH = 2  # a folder in an item's files may be at most this many levels below the workdir
 STAGE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 TASK_KEYS = ("agent", "goal", "context", "workdir", "attach_diff", "diff_base", "write_scope")
-STAGE_KEYS = frozenset(TASK_KEYS + ("name", "split", "for_each", "per_run", "verify"))
+STAGE_KEYS = frozenset(TASK_KEYS + ("name", "split", "for_each", "per_run", "verify", "retry"))
 _FENCE_RE = re.compile(r"```json[ \t]*\r?\n(.*?)\r?\n?```", re.S | re.I)
 
 ITEMS_RULE = (
@@ -34,6 +35,12 @@ VERIFY_RULE = (
     '{"items": [{"id": "...", "title": "..."}], "rejected": [{"id": "...", "reason": "..."}]}. items repeats '
     "only the findings you confirmed with file:line evidence (keep their id); rejected lists the rest with a "
     "short reason.")
+
+RESULT_RULE = (
+    "- End your report with ONE fenced ```json block: "
+    '{"result": "done" | "failed", "reason": "..."}. Use failed when the change is incomplete or the tests '
+    "you were asked to run still fail; reason names the failing test or error in one line. A failed run gets "
+    "another attempt with your report in its context.")
 
 
 class PlanError(ValueError):
@@ -105,13 +112,20 @@ def parse_plan(raw: Any, max_items: int) -> dict:
             raise PlanError("invalid_plan", f"{where}: verify must be true or false.")
         if verify and for_each is None:
             raise PlanError("invalid_plan", f"{where}: a verify stage needs for_each (the findings it checks).")
+        retry = item.get("retry", 0)
+        if isinstance(retry, bool) or not isinstance(retry, int) or not 0 <= retry <= MAX_RETRY:
+            raise PlanError("invalid_plan", f"{where}: retry must be a whole number in 0-{MAX_RETRY}.")
+        if retry and (verify or for_each is None):
+            raise PlanError("invalid_plan", f"{where}: retry is for writer for_each stages (not verify, split or "
+                                            "single-run stages).")
         if for_each is not None and item.get("write_scope") not in (None, "", []):
             raise PlanError("invalid_plan", f"{where}: a for_each stage takes its write scope from the items' files.")
         task = {key: item.get(key) for key in TASK_KEYS}
         if task.get("workdir") in (None, "") and workdir:
             task["workdir"] = workdir
         stages.append({"name": name, "task": task, "split": [s.strip() for s in split] if split else None,
-                       "for_each": for_each, "per_run": per_run, "verify": verify, "where": where})
+                       "for_each": for_each, "per_run": per_run, "verify": verify, "retry": retry,
+                       "where": where})
         seen.append(name)
     producers = {s["for_each"] for s in stages if s["for_each"]}
     for stage in stages:
@@ -195,6 +209,16 @@ def parse_verdicts(summary: Any, incoming: list[dict]) -> tuple[list[str], dict[
         if item_id not in confirmed and item_id not in rejected:
             rejected[item_id] = "verdict_missing"
     return [i for i in by_id if i in confirmed], rejected
+
+
+def parse_result(summary: Any) -> tuple[str | None, str]:
+    """("done" | "failed" | None, reason) from a writer run's result block; None when it has none."""
+    data = last_json_block(summary)
+    if data is None:
+        return None, ""
+    result = str(data.get("result") or "").strip().lower()
+    reason = _clip(data.get("reason") or "", MAX_TITLE_CHARS)
+    return (result if result in ("done", "failed") else None), reason
 
 
 def plan_scope(files: list, workdir: str) -> tuple[str, ...] | None:

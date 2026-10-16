@@ -51,6 +51,9 @@ _STAGE = {
                                     "item in the run's context. A writer's write_scope comes from the items' files."},
         "per_run": {"type": "integer", "minimum": 1, "maximum": 8,
                     "description": "Items per run in a for_each stage (default 1; batch verify stages, e.g. 4)."},
+        "retry": {"type": "integer", "minimum": 0, "maximum": 2,
+                  "description": "Writer for_each stages: extra attempts for a run that reports failed (tests "
+                                 "still red), with its report in context; stops early when it fails the same way."},
         "verify": {"type": "boolean",
                    "description": "This for_each stage (a read-only agent) confirms or rejects the items; only "
                                   "confirmed ones go on."},

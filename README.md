@@ -123,8 +123,20 @@ characters). The lead pays for the plan and the final result, not for every repo
   inside the workdir (files, or folders at most two levels down); an item that breaks this is
   `refused_scope` and never fixed. Writers with disjoint scopes run in parallel; items without files
   run as unscoped writers, one at a time.
+- `retry` (0-2) on a writer `for_each` stage is a fix loop: each run ends with a
+  `{"result": "done" | "failed", "reason": ...}` block, and a run that reports failed (or ends in error)
+  gets another attempt with its own report in context. The loop stops early when an attempt fails
+  with the same reason as the one before (no progress). Interrupted, cancelled or lost runs and launch
+  refusals are never retried. A run that leaves out the block counts as done. Attempts count per
+  stage; items show `attempts` in the result.
+- Writer items whose files overlap go to ONE run (with all of them in its context), so fixes in the
+  same file never wait for each other or conflict; disjoint groups still run in parallel. A group is
+  never split, so it can hold more items than `per_run`.
 - A stage with no items ends the plan early (`succeeded`, later stages `skipped`); a failed run
   stops it.
+- When the lead chains a second `agents_run` fan-out (3+ reports) in one turn, it gets a one-time
+  hint to use a plan for the remaining stages (off with `nudge_after: 0`). Counting only, never
+  blocking.
 - No background work: a plan moves on only while the lead waits in `agents_run` or `agents_status`.
   When the wait ends first, the result has a one-line `progress` and the lead continues with
   `agents_status(plan_id=..., wait_seconds=...)`. `agents_status(plan_id=..., item="scan-3")` returns

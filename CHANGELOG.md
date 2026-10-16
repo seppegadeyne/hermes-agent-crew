@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 (2026-10-16)
+
+Follow-ups to plans. Expected effect: fewer failed plans that the lead has to rerun by hand (fix
+loop), no waiting writers for fixes in the same file (grouping), and more jobs moved to plans
+(hint). None of these adds tokens to the lead's context; the hint is one line, once per turn.
+
+- Fix loop: `retry: 0-2` on a writer `for_each` stage. Its runs end with a result block; a run that
+  reports `failed` or ends in error gets another attempt with its report in context, and the loop
+  stops early when an attempt fails for the same reason as the last (no progress). Items show
+  `attempts` (counted per stage); stages show `retried`. Only reported failures and runs that failed
+  while working are retried; interrupted, cancelled or lost runs, launch refusals and stages that
+  already have a hard failure are not. `retry` is refused on read-only and non-for_each stages.
+- Items whose files overlap go to one writer run, so same-file fixes neither wait nor conflict.
+  Chosen instead of git worktrees per builder: worktrees need a merge step whose conflicts would
+  cost another agent or lead round trip, which works against both plugin goals.
+- Plan hint: the second `agents_run` tasks fan-out with 3+ reports in one turn gets a one-line hint
+  to use a plan. Off with `nudge_after: 0`.
+
 ## 0.7.0 (2026-10-16)
 
 Agent plans: the lead writes a big job once as stages, and the plugin runs them one after another
