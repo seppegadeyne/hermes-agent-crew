@@ -36,11 +36,11 @@ def register(ctx):
 
     def command(raw_args: str = "", **_kwargs) -> str:
         try:
-            return service.roster_text()
+            return service.roster_text(raw_args)
         except Exception as exc:
             return f"hermes-agent-crew: {str(exc)[:500]}"
 
-    ctx.register_command("crew", handler=command, description="List the agents, their models and providers")
+    ctx.register_command("crew", handler=command, description="Agents, models and providers; /crew <agent> for details")
 
     def deprecated(raw_args: str = "", **_kwargs) -> str:
         return "/claude-agents is deprecated; use /crew.\n" + command(raw_args)

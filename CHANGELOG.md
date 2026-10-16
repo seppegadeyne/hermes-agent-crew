@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 (2026-10-16)
+
+- `/crew` prints an aligned table (agent, tier, model @ provider, access, fallback routes marked
+  `(down)`), a status block, numbered agent folders and problems; `/crew <agent>` shows one agent in
+  full (routes with up/down, tools, source, trigger, description). The lead's prompt is unchanged.
+
 ## 0.8.0 (2026-10-16)
 
 Follow-ups to plans. Expected effect: fewer failed plans that the lead has to rerun by hand (fix

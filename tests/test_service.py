@@ -437,7 +437,7 @@ def test_prompt_section_keeps_the_trigger_and_the_fan_out_rule(rig):
     assert "Use when a whole text file needs the language MCP checks." in line
     assert len(line) < 220 and "characters omitted" not in text
     assert "Mechanical fan-out" in text and "COMPLETE input" in text and len(text) <= 3_800
-    assert "use when: a whole text file" in rig.service.roster_text()
+    assert "a whole text file" in rig.service.roster_text("lang-checker")
 
 
 def test_a_full_roster_keeps_every_trigger_and_the_usage_guide(rig):
@@ -469,8 +469,11 @@ def test_roster_text_lists_agents_and_problems(rig):
     (rig.home / "claude-agents").mkdir()
     (rig.home / "claude-agents" / "bad.md").write_text("---\nname: BAD\n---\n")
     text = rig.service.roster_text()
-    assert "reviewer (strong: opus, claude-subscription-directsdk-experimental, read-only)" in text
+    assert "reviewer    strong    opus @ claude-subscription-directsdk-experimental" in text
     assert "problem:" in text and "bad.md" in text
+    detail = rig.service.roster_text("reviewer")
+    assert detail.startswith("reviewer  (read-only)") and "Use when" in detail and "Description" in detail
+    assert "No agent named 'ghost'" in rig.service.roster_text("ghost")
 
 
 def lead_result(rig, tool, args=None, turn="t1", session="lead-1", result='{"content": "x"}'):
@@ -709,5 +712,5 @@ def test_roster_text_shows_routes_and_their_state(rig):
     rig.host.endpoints = {"strata-qwen": "http://127.0.0.1:8081/v1"}
     rig.host.down = {"http://127.0.0.1:8081/v1"}
     text = rig.service.roster_text()
-    assert "explorer (fast: strata or haiku, read-only)" in text
-    assert f"routes (first reachable runs): strata-qwen/strata [down] -> {DIRECT}/haiku" in text
+    assert "strata @ strata-qwen  (down)" in text and f"└ then haiku @ {DIRECT}" in text
+    assert "Route 1      strata @ strata-qwen  (down)" in rig.service.roster_text("explorer")

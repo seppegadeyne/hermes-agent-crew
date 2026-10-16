@@ -15,6 +15,7 @@ import contextvars
 import json
 import os
 import shlex
+import textwrap
 import threading
 import time
 import uuid
@@ -1384,34 +1385,79 @@ class AgentsService:
 
     # ------------------------------------------------------------------ text surfaces
 
-    def roster_text(self) -> str:
+    def roster_text(self, raw_args: str = "") -> str:
+        """The /crew command: a status table for the operator, or one agent's details with /crew <name>."""
         settings, problems, roster = self.config()
+        name = (raw_args or "").strip().lower()
+        if name:
+            spec = roster.agents.get(name)
+            if spec is None:
+                return f"No agent named {name!r}. Agents: {', '.join(sorted(roster.agents)) or 'none'}."
+            return self._agent_detail(spec)
         features = self.features()
-        lines = [f"Agents ({len(roster.agents)}):" if roster.agents else "No agents configured."]
+        if not roster.agents:
+            return "Crew: no agents configured.\n" + self._crew_footer(settings, problems, roster, features)
+        rows = []
         for spec in sorted(roster.agents.values(), key=lambda s: s.name):
-            flags = [model_label(spec)]
-            if spec.provider and not spec.routes:
-                flags.append(spec.provider + ("" if self._endpoint_up(spec.provider) else " [down]"))
-            if spec.readonly:
-                flags.append("read-only")
-            lines.append(f"  {spec.name} ({', '.join(flags)}) - {spec.description or '(no description)'}")
-            if spec.routes:
-                chain = " -> ".join(f"{p or 'lead'}/{m}" + ("" if self._endpoint_up(p) else " [down]")
-                                    for p, m in spec.routes)
-                lines.append(f"    routes (first reachable runs): {chain}")
-            if spec.use_when:
-                lines.append(f"    use when: {spec.use_when}")
-        lines.append("Agent folders (a later folder overrides an earlier one): " + "; ".join(roster.folders))
-        lines.append("This Hermes build: per-agent provider=" + ("yes" if features["provider"] else "no")
-                     + ", per-agent effort=" + ("yes" if features["effort"] else "no"))
+            routes = spec.routes or ((spec.provider, spec.model),)
+            access = "read-only" if spec.readonly else "writes"
+            for n, (provider, model) in enumerate(routes):
+                route = f"{model or 'lead model'} @ {provider or 'lead provider'}"
+                state = "" if self._endpoint_up(provider) else "  (down)"
+                if n == 0:
+                    rows.append((spec.name, spec.tier or "-", route + state, access))
+                else:
+                    rows.append(("", "", f"└ then {route}{state}", ""))
+        head = ("AGENT", "TIER", "MODEL @ PROVIDER", "ACCESS")
+        widths = [max(len(r[i]) for r in rows + [head]) for i in range(3)]
+
+        def line(cells: tuple) -> str:
+            return "  " + "  ".join(c.ljust(widths[i]) for i, c in enumerate(cells[:3])) + "  " + cells[3]
+
+        out = [f"Crew: {len(roster.agents)} agents", "", line(head)]
+        out += [line(r).rstrip() for r in rows]
+        out.append("")
+        out.append(self._crew_footer(settings, problems, roster, features))
+        return "\n".join(out)
+
+    def _crew_footer(self, settings: dict, problems: list, roster: Roster, features: dict) -> str:
         with self._lock:
             running = sum(1 for r in self._runs.values() if r.status == "running")
-        lines.append(f"Runs in progress in this process: {running}")
-        for problem in (problems + roster.problems)[:20]:
-            lines.append(f"  problem: {problem}")
-        for warning in roster.warnings[:10]:
-            lines.append(f"  warning: {warning}")
-        return "\n".join(lines)
+            plans = sum(1 for p in self._plans.values() if p.status == "running")
+        yes = {True: "yes", False: "no"}
+        out = ["Status",
+               f"  Runs in progress  {running}" + (f" (+{plans} plan{'s' if plans != 1 else ''})" if plans else ""),
+               f"  Hermes build      per-agent provider: {yes[features['provider']]}, "
+               f"per-agent effort: {yes[features['effort']]}",
+               "",
+               "Agent folders (a later one overrides an earlier one)"]
+        for n, folder in enumerate(roster.folders, 1):
+            out.append(f"  {n}. {folder}" + ("  (built-in)" if n == 1 else ""))
+        issues = [f"  problem: {p}" for p in (problems + roster.problems)[:20]] + \
+            [f"  warning: {w}" for w in roster.warnings[:10]]
+        out += ["", "Problems" if issues else "Problems: none"] + issues
+        out += ["", "Details of one agent: /crew <agent>"]
+        return "\n".join(out)
+
+    def _agent_detail(self, spec: AgentSpec) -> str:
+        out = [f"{spec.name}  ({'read-only' if spec.readonly else 'can change files'})", ""]
+        if spec.tier:
+            out.append(f"  Tier         {spec.tier}")
+        routes = spec.routes or ((spec.provider, spec.model),)
+        for n, (provider, model) in enumerate(routes):
+            label = "Route" if len(routes) == 1 else f"Route {n + 1}"
+            state = "up" if self._endpoint_up(provider) else "down"
+            out.append(f"  {label:<12} {model or 'lead model'} @ {provider or 'lead provider'}  ({state})")
+        if spec.effort:
+            out.append(f"  Effort       {spec.effort}")
+        if spec.tools is not None:
+            out.append("  Tools        " + ", ".join(spec.tools))
+        out.append(f"  Source       {spec.source}")
+        if spec.use_when:
+            out += ["", "Use when", "  " + spec.use_when]
+        if spec.description:
+            out += ["", "Description", *("  " + row for row in textwrap.wrap(spec.description, 96))]
+        return "\n".join(out)
 
     def prompt_section(self, info: Any = None) -> str:
         if _depth(self.host.parent()) > 0 or self.host.in_child_context():

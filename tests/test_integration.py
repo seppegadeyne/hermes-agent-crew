@@ -41,9 +41,9 @@ def test_loader_registers_tools_hooks_command_and_prompt(loaded):
     for hook in ("pre_tool_call", "subagent_start", "subagent_stop", "transform_tool_result"):
         assert loaded.plugins.has_hook(hook), hook
     text = loaded.manager._plugin_commands["crew"]["handler"]("")
-    assert "reviewer (strong: opus" in text and "explorer (fast: haiku" in text and "builder (balanced: sonnet" in text
+    assert "reviewer    strong" in text and "haiku @" in text and "builder     balanced  sonnet @" in text
     alias = loaded.manager._plugin_commands["claude-agents"]["handler"]("")
-    assert alias.startswith("/claude-agents is deprecated; use /crew.") and "explorer (fast: haiku" in alias
+    assert alias.startswith("/claude-agents is deprecated; use /crew.") and "explorer" in alias
     sections = loaded.plugins.render_system_prompt_sections({"session_id": "s", "model": "sonnet"})
     assert any("agents_run" in section.content for section in sections)
 

@@ -62,26 +62,39 @@ Requirements:
 ## The /crew command
 
 `/crew` is a read-only status command for the operator; it starts nothing. Type it in a Hermes
-session (CLI, TUI or a gateway chat). It takes no arguments and shows:
+session (CLI, TUI or a gateway chat). Without arguments it shows a table:
 
 - every agent with its tier and model, its provider, and `read-only` where that applies;
-- for a tier with several routes, the chain in order (`routes (first reachable runs): ...`) with
-  `[down]` after a local endpoint that does not answer right now;
-- each agent's `use when` trigger, which is what the lead reads to pick it;
+- for a tier with several routes, the fallbacks in order (`└ then ...`), with `(down)` after a
+  local endpoint that does not answer right now;
 - the agent folders in load order (a later file with the same name replaces an earlier one);
 - whether this Hermes build supports a provider and an effort per agent;
 - runs in progress in this process, and any problems in agent files or settings.
 
 ```text
-Agents (5):
-  explorer (fast: strata or haiku, read-only) - Fast read-only codebase scout. ...
-    routes (first reachable runs): strata-qwen/strata [down] -> claude-subscription-directsdk-experimental/haiku
-    use when: you would otherwise read or grep many files to find where something lives or how it is wired
-  reviewer (strong: opus, claude-subscription-directsdk-experimental, read-only) - Senior read-only reviewer. ...
-Agent folders (a later folder overrides an earlier one): .../agents; ~/.hermes/claude-agents
-This Hermes build: per-agent provider=yes, per-agent effort=no
-Runs in progress in this process: 0
+Crew: 5 agents
+
+  AGENT       TIER      MODEL @ PROVIDER                                           ACCESS
+  builder     balanced  sonnet @ claude-subscription-directsdk-experimental        writes
+  explorer    fast      strata @ strata-qwen  (down)                               read-only
+                        └ then haiku @ claude-subscription-directsdk-experimental
+  reviewer    strong    opus @ claude-subscription-directsdk-experimental          read-only
+
+Status
+  Runs in progress  0
+  Hermes build      per-agent provider: yes, per-agent effort: no
+
+Agent folders (a later one overrides an earlier one)
+  1. .../hermes-agent-crew/agents  (built-in)
+  2. ~/.hermes/claude-agents
+
+Problems: none
+
+Details of one agent: /crew <agent>
 ```
+
+`/crew <agent>` (for example `/crew explorer`) shows one agent in full: every route with `up` or
+`down`, tools, source file, the `use when` trigger and the description.
 
 Use it after changing an agent file or the `tiers`/`overrides` settings (the roster reloads on its
 own; no restart needed), to see whether a local model is reachable, or when the lead says it cannot
