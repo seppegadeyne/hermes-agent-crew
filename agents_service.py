@@ -25,8 +25,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import agents_git
+from . import agents_git, agents_plan
 from .agents_config import INT_RANGES, AgentSpec, Roster, RosterCache, read_settings
+from .agents_plan import PlanError
 from .agents_policy import ChildPolicy, PolicyRegistry, scope_path, scopes_overlap
 
 PLUGIN_ID = "hermes-agent-crew"
@@ -61,6 +62,9 @@ _SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
 _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
+PLAN_REPORT_CHARS = 8_000        # the lead reads at most this much of a plan's result
+PLAN_TRAIL_CHARS = 4_000         # per run summary kept in an item's trail
+MAX_TRACKED_PLANS = 32
 PROBE_TTL_UP_SECONDS = 60.0     # an endpoint that answered is trusted this long
 PROBE_TTL_DOWN_SECONDS = 15.0   # one that did not is retried sooner (a local server may be starting)
 ISOLATION_MESSAGE = ("hermes-agent-crew needs plugins.isolation: in_process. Inside the plugin host process "
@@ -70,6 +74,7 @@ ISOLATION_MESSAGE = ("hermes-agent-crew needs plugins.isolation: in_process. Ins
 class Refusal(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
+        self.code = code
         self.payload = {"ok": False, "error": code, "message": message}
 
 
@@ -124,6 +129,7 @@ class Run:
     unsupported: list = field(default_factory=list)
     note: str | None = None
     fallback: str | None = None  # routes skipped because their endpoint did not answer
+    plan_id: str | None = None   # set for runs a plan launched; the plan reports them, not agents_status
     stop: dict | None = None
     cancel_requested: bool = False
     reported: bool = False
@@ -135,6 +141,32 @@ class _Intent:
     policy: ChildPolicy
     subagent_id: str | None = None
     child_session_id: str | None = None
+
+
+@dataclass
+class Plan:
+    """A plan's state. It advances only inside the lead's own agents_run / agents_status waits."""
+    plan_id: str
+    owner_session_id: str
+    owner_ref: Callable[[], Any] | None
+    stages: list                     # parsed stages, each with "spec" and "task" (the template)
+    started_at: float
+    status: str = "running"          # running | succeeded | failed | cancelled
+    stage_index: int = 0
+    stage_started: float = 0.0
+    items: dict = field(default_factory=dict)       # item id -> item (with status, reason, trail)
+    outputs: dict = field(default_factory=dict)     # stage name -> item ids it passes on
+    queue: list = field(default_factory=list)       # (spec, task, item ids) not launched yet
+    current: list = field(default_factory=list)     # (run, item ids) of the current stage
+    done: list = field(default_factory=list)        # (run, item ids) finished in the current stage
+    stats: list = field(default_factory=list)       # per finished stage
+    final: str | None = None
+    error: str | None = None
+    note: str | None = None
+    finished_at: float | None = None
+    reported: bool = False
+    lock: Any = field(default_factory=threading.Lock, repr=False)  # one advancer at a time
+    cancelled_runs: list = field(default_factory=list)  # still polled after a cancel, so admission frees up
 
 
 class AgentsService:
@@ -150,6 +182,7 @@ class AgentsService:
         self._intent: contextvars.ContextVar = contextvars.ContextVar("hermes_agent_crew_intent", default=None)
         self._nudges: OrderedDict[str, dict] = OrderedDict()  # lead session id -> this turn's scouting count
         self._probes: dict[str, tuple[bool, float]] = {}  # endpoint base_url -> (up, checked at)
+        self._plans: OrderedDict[str, Plan] = OrderedDict()
 
     # ------------------------------------------------------------------ configuration
 
@@ -280,6 +313,8 @@ class AgentsService:
             raise Refusal("spawn_paused", "The operator paused delegation; new agents cannot start right now.")
         session_id = str(session_id or getattr(parent, "session_id", "") or "")
         settings, problems, roster = self.config()
+        if args.get("plan") is not None:
+            return self._run_plan(args, parent, session_id, settings, problems, roster, started)
         tasks = self._parse_tasks(args, settings, roster)
         features = self.features()
         parent_provider = str(getattr(parent, "provider", "") or "")
@@ -289,9 +324,7 @@ class AgentsService:
         # Admission and launch are one step: two agents_run calls at the same time must not both pass the
         # writer and live-run checks before either has tracked its runs. Launching only starts threads.
         with self._admit:
-            with self._lock:
-                mine = [r for r in self._runs.values()
-                        if self._owns(r, session_id, parent) and r.status == "running"]
+            mine = self._live_runs(session_id, parent)
             self._check_writers([(spec, task) for spec, task in tasks if not spec.readonly],
                                 [r for r in mine if not r.readonly], settings)
             if len(mine) + len(tasks) > settings["max_live_runs"]:
@@ -302,6 +335,14 @@ class AgentsService:
                     for spec, task in tasks]
         early = self._wait(runs, started + self._wait_budget(args.get("wait_seconds"), settings))
         return self._report(runs, settings, problems, roster, early)
+
+    def _live_runs(self, session_id: str, parent: Any) -> list:
+        """This conversation's runs that are really still running: each one is polled first, so a run that
+        finished while nobody waited on it (a plan's cancelled run, a wait_seconds 0 run) frees its slot.
+        Polling does not mark a run reported, so agents_status output is unchanged."""
+        with self._lock:
+            owned = [r for r in self._runs.values() if self._owns(r, session_id, parent) and r.status == "running"]
+        return [r for r in owned if not self._poll(r)]
 
     @staticmethod
     def _check_writers(new: list, live: list, settings: dict) -> None:
@@ -341,6 +382,8 @@ class AgentsService:
         parent = self._parent_or_refuse()
         session_id = str(session_id or getattr(parent, "session_id", "") or "")
         settings, problems, roster = self.config()
+        if args.get("plan_id") is not None:
+            return self._status_plan(args, parent, session_id, settings, problems, roster, started)
         ids = args.get("run_ids")
         if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, str) for i in ids)):
             raise Refusal("invalid_arguments", "run_ids must be a list of run_id strings.")
@@ -355,7 +398,8 @@ class AgentsService:
                     else:
                         runs.append(run)
             else:
-                runs = [r for r in self._runs.values() if self._owns(r, session_id, parent) and not r.reported]
+                runs = [r for r in self._runs.values()
+                        if self._owns(r, session_id, parent) and not r.reported and not r.plan_id]
         if args.get("cancel"):
             if not ids:
                 raise Refusal("run_ids_required", "Name the runs to cancel in run_ids.")
@@ -368,6 +412,11 @@ class AgentsService:
             out["unknown_run_ids"] = unknown
         if not runs and not unknown:
             out["note"] = "No unreported agent runs in this conversation."
+        with self._lock:
+            live_plans = [p.plan_id for p in self._plans.values()
+                          if p.status == "running" and self._owns(p, session_id, parent)]
+        if not ids and live_plans:
+            out["plans_running"] = live_plans
         return out
 
     def _parent_or_refuse(self) -> Any:
@@ -403,40 +452,40 @@ class AgentsService:
         if len(raw) > settings["max_parallel"]:
             raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call; nothing was started. "
                                             "Send the rest in a second agents_run call, or merge related tasks.")
+        return [self._parse_task(item, f"tasks[{index}]", roster) for index, item in enumerate(raw)]
+
+    def _parse_task(self, item: Any, where: str, roster: Roster) -> tuple:
+        """One task (or a plan stage's task fields) -> (AgentSpec, normalized task dict); raises Refusal."""
+        if not isinstance(item, dict):
+            raise Refusal("invalid_arguments", f"{where} must be an object.")
         names = ", ".join(sorted(roster.agents)) or "none (see /crew)"
-        tasks = []
-        for index, item in enumerate(raw):
-            where = f"tasks[{index}]"
-            if not isinstance(item, dict):
-                raise Refusal("invalid_arguments", f"{where} must be an object.")
-            name = str(item.get("agent") or "").strip().lower()
-            spec = roster.agents.get(name)
-            if spec is None:
-                raise Refusal("unknown_agent", f"{where}: unknown agent {name!r}. Agents: {names}.")
-            goal = item.get("goal")
-            if not isinstance(goal, str) or not goal.strip():
-                raise Refusal("invalid_goal", f"{where}: goal must be a non-empty string.")
-            if len(goal) > MAX_GOAL_CHARS:
-                raise Refusal("invalid_goal", f"{where}: goal is longer than {MAX_GOAL_CHARS} characters; move "
-                                              "background material into context.")
-            context = item.get("context")
-            if context is not None and not isinstance(context, str):
-                raise Refusal("invalid_context", f"{where}: context must be a string.")
-            base = item.get("diff_base")
-            if base not in (None, "") and not agents_git.valid_ref(base):
-                raise Refusal("invalid_diff_base", f"{where}: diff_base {base!r} is not a git ref.")
-            attach = item.get("attach_diff")
-            workdir = self._workdir(item.get("workdir"), where)
-            write_scope = self._write_scope(item.get("write_scope"), workdir or self.host.cwd(), spec, where)
-            tasks.append((spec, {
-                "goal": goal.strip(),
-                "context": (context or "").strip(),
-                "attach_diff": attach is True or (isinstance(attach, str) and attach.strip().lower() == "true"),
-                "diff_base": base.strip() if isinstance(base, str) and base.strip() else None,
-                "workdir": workdir,
-                "write_scope": write_scope,
-            }))
-        return tasks
+        name = str(item.get("agent") or "").strip().lower()
+        spec = roster.agents.get(name)
+        if spec is None:
+            raise Refusal("unknown_agent", f"{where}: unknown agent {name!r}. Agents: {names}.")
+        goal = item.get("goal")
+        if not isinstance(goal, str) or not goal.strip():
+            raise Refusal("invalid_goal", f"{where}: goal must be a non-empty string.")
+        if len(goal) > MAX_GOAL_CHARS:
+            raise Refusal("invalid_goal", f"{where}: goal is longer than {MAX_GOAL_CHARS} characters; move "
+                                          "background material into context.")
+        context = item.get("context")
+        if context is not None and not isinstance(context, str):
+            raise Refusal("invalid_context", f"{where}: context must be a string.")
+        base = item.get("diff_base")
+        if base not in (None, "") and not agents_git.valid_ref(base):
+            raise Refusal("invalid_diff_base", f"{where}: diff_base {base!r} is not a git ref.")
+        attach = item.get("attach_diff")
+        workdir = self._workdir(item.get("workdir"), where)
+        write_scope = self._write_scope(item.get("write_scope"), workdir or self.host.cwd(), spec, where)
+        return spec, {
+            "goal": goal.strip(),
+            "context": (context or "").strip(),
+            "attach_diff": attach is True or (isinstance(attach, str) and attach.strip().lower() == "true"),
+            "diff_base": base.strip() if isinstance(base, str) and base.strip() else None,
+            "workdir": workdir,
+            "write_scope": write_scope,
+        }
 
     @staticmethod
     def _write_scope(raw: Any, base: Path, spec: AgentSpec, where: str) -> tuple:
@@ -607,6 +656,7 @@ class AgentsService:
             rules.append("- Only your configured tools work; other tool calls are blocked.")
         rules.append("- Finish with ONE compact report for the lead: findings first (with file:line where it "
                      "applies), then what you checked, then open questions. No transcripts, no full file dumps.")
+        rules.extend(task.get("rules") or ())  # plan stages: the items/verdict block comes last
         parts = [head, "\n".join(rules)]
         remaining = CONTEXT_BUDGET - sum(len(p) + 2 for p in parts)
         caller = clip(task["context"], MAX_CALLER_CONTEXT_CHARS) if task["context"] else ""
@@ -675,12 +725,16 @@ class AgentsService:
             value = min(value, max(0.0, float(deadline) - DEADLINE_MARGIN_SECONDS))
         return value
 
-    def _wait(self, runs: list, stop_at: float) -> str | None:
-        """Poll until every run is finished or ``stop_at`` (clock time) passes; returns why it stopped early."""
+    def _wait(self, runs: list, stop_at: float, plans: tuple = (), step: Callable | None = None) -> str | None:
+        """Poll until every run (and plan) is finished or ``stop_at`` (clock time) passes; returns why it
+        stopped early. ``step`` advances the plans: the only place a plan moves on."""
         pending = [run for run in runs if run.status == "running"]
-        while pending:
+        while pending or any(plan.status == "running" for plan in plans):
             pending = [run for run in pending if not self._poll(run)]
-            if not pending or self.clock() >= stop_at:
+            for plan in plans:
+                if plan.status == "running" and step is not None:
+                    step(plan)
+            if (not pending and not any(plan.status == "running" for plan in plans)) or self.clock() >= stop_at:
                 return None
             if self.host.interrupted():
                 return "interrupted"
@@ -816,6 +870,381 @@ class AgentsService:
                                "Read the message, then collect them with agents_status.")
             elif early == "interrupted":
                 out["next"] = "Stopped waiting after an interrupt; agents that were not stopped keep working."
+        notes = list(problems or [])
+        if roster is not None and roster.problems:
+            notes.append(f"{len(roster.problems)} agent file problem(s); /crew lists them.")
+        if notes:
+            out["config_problems"] = notes[:5]
+        return out
+
+    # ------------------------------------------------------------------ plans
+
+    def _run_plan(self, args: dict, parent: Any, session_id: str, settings: dict, problems: list,
+                  roster: Roster, started: float) -> dict:
+        if args.get("tasks") is not None:
+            raise Refusal("invalid_plan", "Pass either tasks or plan, not both.")
+        try:
+            parsed = agents_plan.parse_plan(args.get("plan"), settings["plan_max_items"])
+        except PlanError as exc:
+            raise Refusal(exc.code, str(exc)) from None
+        for stage in parsed["stages"]:
+            spec, task = self._parse_task(stage["task"], stage["where"], roster)
+            if stage["verify"] and not spec.readonly:
+                raise Refusal("invalid_plan", f"{stage['where']}: a verify stage needs a read-only agent, "
+                                              f"and '{spec.name}' can change files.")
+            for part in stage["split"] or ():
+                if len(task["goal"]) + len(part) + 14 > MAX_GOAL_CHARS:
+                    raise Refusal("invalid_goal", f"{stage['where']}: goal plus split part {part[:40]!r} is longer "
+                                                  f"than {MAX_GOAL_CHARS} characters.")
+            stage["spec"], stage["template"] = spec, task
+        if settings["max_parallel_writers"] == 0 and any(not st["spec"].readonly for st in parsed["stages"]):
+            raise Refusal("writers_disabled", "The operator turned off agents that change files "
+                                              "(max_parallel_writers: 0); this plan has a writer stage.")
+        features = self.features()
+        with self._admit:
+            with self._lock:
+                busy = [p for p in self._plans.values() if p.status == "running" and self._owns(p, session_id, parent)]
+            if busy:
+                raise Refusal("plan_running", f"Plan {busy[0].plan_id} is still running in this conversation. Collect "
+                                              "it with agents_status(plan_id=...) or cancel it first.")
+            plan = Plan(plan_id="pl_" + uuid.uuid4().hex[:10], owner_session_id=session_id, owner_ref=_weak(parent),
+                        stages=parsed["stages"], started_at=self.clock(), stage_started=self.clock())
+            self._track_plan(plan)
+        with plan.lock:
+            self._start_stage(plan, parent, settings, features)
+        early = self._wait([], started + self._wait_budget(args.get("wait_seconds"), settings), plans=(plan,),
+                           step=lambda p: self._step(p, parent, settings, features))
+        return self._plan_report(plan, problems, roster, early)
+
+    def _status_plan(self, args: dict, parent: Any, session_id: str, settings: dict, problems: list,
+                     roster: Roster, started: float) -> dict:
+        plan_id = args.get("plan_id")
+        with self._lock:
+            plan = self._plans.get(plan_id) if isinstance(plan_id, str) else None
+        if plan is None or not self._owns(plan, session_id, parent):
+            raise Refusal("unknown_plan", f"No plan {plan_id!r} in this conversation.")
+        plan.owner_session_id = session_id or plan.owner_session_id
+        item_id = args.get("item")
+        if item_id is not None:
+            item = plan.items.get(item_id) if isinstance(item_id, str) else None
+            if item is None:
+                raise Refusal("unknown_item", f"Plan {plan.plan_id} has no item {item_id!r}.")
+            return {"ok": True, "plan_id": plan.plan_id, "item": self._item_trail(item)}
+        if args.get("cancel") and plan.status == "running":
+            reason = clip(args.get("reason") or "plan cancelled by the lead agent", 500)
+            with plan.lock:  # waits for an advancer in another call: no wave can launch after this
+                for run, _ in plan.current:
+                    self._cancel(run, reason)
+                plan.cancelled_runs.extend(run for run, _ in plan.current)
+                plan.queue.clear()
+                self._end_plan(plan, "cancelled", note=reason)
+        features = self.features()
+        budget = started + self._wait_budget(args.get("wait_seconds", 0), settings)
+        early = self._wait(list(plan.cancelled_runs), budget, plans=(plan,),
+                           step=lambda p: self._step(p, parent, settings, features))
+        return self._plan_report(plan, problems, roster, early)
+
+    def _track_plan(self, plan: Plan) -> None:
+        with self._lock:
+            self._plans[plan.plan_id] = plan
+            while len(self._plans) > MAX_TRACKED_PLANS:
+                victim = next((pid for pid, p in self._plans.items() if p.status != "running" and p.reported),
+                              None) or next((pid for pid, p in self._plans.items() if p.status != "running"), None)
+                if victim is None:
+                    break
+                self._plans.pop(victim)
+
+    def _start_stage(self, plan: Plan, parent: Any, settings: dict, features: dict) -> None:
+        """Build the current stage's runs (queued) and launch the first wave."""
+        stage = plan.stages[plan.stage_index]
+        plan.stage_started = self.clock()
+        plan.current, plan.done = [], []
+        spec = self._pick_route(stage["spec"], None if features["provider"] else
+                                str(getattr(parent, "provider", "") or ""))
+        template = dict(stage["template"])
+        rules = [agents_plan.VERIFY_RULE] if stage["verify"] else \
+            [agents_plan.ITEMS_RULE] if stage["produces"] else []
+        template["rules"] = rules
+        if stage["split"]:
+            for part in stage["split"]:
+                plan.queue.append((spec, {**template, "goal": f"{template['goal']}\n\nYour part: {part}"}, []))
+        elif stage["for_each"]:
+            ids = [i for i in plan.outputs.get(stage["for_each"], []) if plan.items[i]["status"] != "refused_scope"]
+            workdir = str(template.get("workdir") or self.host.cwd())
+            batch: list = []
+            for item_id in ids:
+                item = plan.items[item_id]
+                if not spec.readonly and item["files"] and agents_plan.plan_scope(item["files"], workdir) is None:
+                    item["status"], item["reason"] = "refused_scope", "files outside the workdir or too broad"
+                    continue
+                batch.append(item_id)
+                if len(batch) == stage["per_run"]:
+                    plan.queue.append(self._item_task(plan, spec, template, batch, workdir))
+                    batch = []
+            if batch:
+                plan.queue.append(self._item_task(plan, spec, template, batch, workdir))
+        else:
+            plan.queue.append((spec, template, []))
+        if not plan.queue:  # every item was refused: nothing to run, and nothing to pass on
+            for later in plan.stages[plan.stage_index:]:
+                plan.stats.append({"name": later["name"], "skipped": True})
+            self._end_plan(plan, "succeeded", note=f"stage {stage['name']}: no item passed the scope rule; the "
+                                                    "remaining stages were skipped")
+            return
+        self._launch_wave(plan, parent, settings, features)
+
+    def _item_task(self, plan: Plan, spec: AgentSpec, template: dict, ids: list, workdir: str) -> tuple:
+        detail_budget = max(300, 12_000 // max(1, len(ids)))
+        items = [{**agents_plan.item_view(plan.items[i]), "detail": clip(plan.items[i]["detail"], detail_budget)}
+                 for i in ids]
+        # Items first: _compose_context clips the caller context from the end, never the items.
+        context = "## Items\n" + json.dumps(items, ensure_ascii=False, indent=1) + \
+            ("\n\n" + template["context"] if template["context"] else "")
+        task = {**template, "context": context}
+        if not spec.readonly:
+            # Item files were checked in _start_stage. An item without files gets the whole workdir: still
+            # inside the repository, and overlapping every other scope, so such writers run one at a time.
+            root = os.path.realpath(workdir)
+            scopes = [agents_plan.plan_scope(plan.items[i]["files"], workdir) or (root,) for i in ids]
+            task["write_scope"] = tuple(dict.fromkeys(p for scope in scopes for p in scope))
+        return spec, task, list(ids)
+
+    def _launch_wave(self, plan: Plan, parent: Any, settings: dict, features: dict) -> None:
+        if not plan.queue or plan.status != "running":
+            return
+        if self.host.spawn_paused():
+            plan.note = "delegation paused by the operator; the next runs wait"
+            return
+        plan.note = None if plan.note and plan.note.startswith("delegation paused") else plan.note
+        parent_provider = str(getattr(parent, "provider", "") or "")
+        with self._admit:
+            mine = self._live_runs(plan.owner_session_id, parent)
+            live_writers = [r for r in mine if not r.readonly]
+            room = min(settings["max_live_runs"] - len(mine),
+                       settings["max_parallel"] - sum(1 for run, _ in plan.current if run.status == "running"))
+            waiting = []
+            for spec, task, ids in plan.queue:
+                if room <= 0:
+                    waiting.append((spec, task, ids))
+                    continue
+                if not spec.readonly:
+                    try:
+                        self._check_writers([(spec, task)], live_writers, settings)
+                    except Refusal as refusal:
+                        if refusal.code == "writers_disabled":
+                            plan.queue = []
+                            self._end_plan(plan, "failed", error=str(refusal.payload.get("message")))
+                            return
+                        waiting.append((spec, task, ids))  # does not fit next to the live writers: next wave
+                        continue
+                run = self._launch(spec, task, parent, parent_provider, plan.owner_session_id, settings, features)
+                run.plan_id = plan.plan_id
+                plan.current.append((run, ids))
+                room -= 1
+                if not spec.readonly and run.status == "running":
+                    live_writers.append(run)
+            plan.queue = waiting
+            if waiting and not any(run.status == "running" for run, _ in plan.current):
+                blockers = [r.run_id for r in mine if r.plan_id != plan.plan_id]
+                plan.note = f"waiting: {len(waiting)} run(s) need a free slot" + (
+                    f"; held by runs outside this plan: {', '.join(blockers[:5])}" if blockers else "")
+            elif (plan.note or "").startswith("waiting:"):
+                plan.note = None
+
+    def _step(self, plan: Plan, parent: Any, settings: dict, features: dict) -> None:
+        """Advance unless another call is advancing the same plan right now (then that call does it)."""
+        if not plan.lock.acquire(blocking=False):
+            return
+        try:
+            self._advance(plan, parent, settings, features)
+        finally:
+            plan.lock.release()
+
+    def _advance(self, plan: Plan, parent: Any, settings: dict, features: dict) -> None:
+        """One step: poll the stage's runs, launch the next wave, and close the stage when all are done."""
+        if plan.status != "running":
+            return
+        still = []
+        for run, ids in plan.current:
+            if run.status == "running" and not self._poll(run):
+                still.append((run, ids))
+            else:
+                run.reported = True
+                plan.done.append((run, ids))
+        plan.current = still
+        if any(run.status != "succeeded" for run, _ in plan.done):
+            plan.queue = []  # a failed run fails the stage: launch nothing more, let the running ones finish
+        if plan.queue:
+            self._launch_wave(plan, parent, settings, features)
+        if plan.current or plan.queue or plan.status != "running":
+            return
+        self._close_stage(plan, parent, settings, features)
+
+    def _close_stage(self, plan: Plan, parent: Any, settings: dict, features: dict) -> None:
+        stage = plan.stages[plan.stage_index]
+        name, done = stage["name"], plan.done
+        stat: dict[str, Any] = {"name": name, "runs": len(done),
+                                "seconds": round(self.clock() - plan.stage_started, 1)}
+        for run, ids in done:
+            for item_id in ids:
+                plan.items[item_id]["trail"].append(
+                    {"stage": name, "run_id": run.run_id, "status": run.status,
+                     "summary": clip(run.summary or run.error or "", PLAN_TRAIL_CHARS)})
+        failed = [(run, ids) for run, ids in done if run.status != "succeeded"]
+        if failed:
+            for r, ids in done:
+                for item_id in ids:
+                    plan.items[item_id]["status"] = f"{name}: done" if r.status == "succeeded" else f"{name}: failed"
+            run = failed[0][0]
+            stat["failed"] = len(failed)
+            plan.stats.append(stat)
+            self._end_plan(plan, "failed", error=f"stage {name}: run {run.run_id} ({run.agent}) {run.status}: "
+                                                 f"{clip(run.error or 'no error message', 600)}")
+            return
+        if stage["produces"]:
+            found, seen = [], set()
+            for run, _ in done:
+                items = agents_plan.parse_items(run.summary)
+                if items is None:
+                    plan.stats.append(stat)
+                    tail = (run.summary or "")[-600:]
+                    self._end_plan(plan, "failed", error=f"stage {name}: run {run.run_id} ({run.agent}) ended without "
+                                                         f"the items block (items_missing). End of its report: {tail}")
+                    return
+                for item in items:
+                    key = (item["title"].lower(), tuple(item["files"]))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    item_id = f"{name}-{len(found) + 1}"
+                    found.append(item_id)
+                    plan.items[item_id] = {**item, "id": item_id, "status": "found", "reason": None,
+                                           "trail": [{"stage": name, "run_id": run.run_id, "status": run.status,
+                                                      "summary": clip(run.summary or "", PLAN_TRAIL_CHARS)}]}
+            if len(found) > settings["plan_max_items"]:
+                plan.stats.append({**stat, "items": len(found)})
+                titles = "; ".join(plan.items[i]["title"][:80] for i in found[:30])
+                self._end_plan(plan, "failed", error=f"stage {name} found {len(found)} items, more than plan_max_items "
+                                                     f"({settings['plan_max_items']}). Split the job. Items: {titles}")
+                return
+            plan.outputs[name] = found
+            stat["items"] = len(found)
+        elif stage["verify"]:
+            confirmed: list = []
+            rejected = 0
+            for run, ids in done:
+                ok, refused = agents_plan.parse_verdicts(run.summary, [plan.items[i] for i in ids])
+                for item_id in ids:
+                    item = plan.items[item_id]
+                    if item_id in ok:
+                        item["status"] = "confirmed"
+                        confirmed.append(item_id)
+                    else:
+                        item["status"], item["reason"] = "rejected", refused.get(item_id, "verdict_missing")
+                        rejected += 1
+            plan.outputs[name] = confirmed
+            stat.update(confirmed=len(confirmed), rejected=rejected)
+        elif stage["for_each"]:
+            passed = []
+            for _, ids in done:
+                for item_id in ids:
+                    plan.items[item_id]["status"] = f"{name}: done"
+                    passed.append(item_id)
+            plan.outputs[name] = passed
+            stat["succeeded"] = len(done)
+        else:
+            stat["succeeded"] = len(done)
+        plan.stats.append(stat)
+        if done:
+            plan.final = self._stage_text(done)
+        plan.stage_index += 1
+        if plan.stage_index >= len(plan.stages):
+            self._end_plan(plan, "succeeded")
+            return
+        nxt = plan.stages[plan.stage_index]
+        if nxt["for_each"] and not plan.outputs.get(nxt["for_each"]):
+            for later in plan.stages[plan.stage_index:]:
+                plan.stats.append({"name": later["name"], "skipped": True})
+            self._end_plan(plan, "succeeded", note=f"stage {nxt['for_each']} passed no items on; the remaining "
+                                                    "stages were skipped")
+            return
+        self._start_stage(plan, parent, settings, features)
+
+    @staticmethod
+    def _stage_text(done: list) -> str | None:
+        if len(done) == 1:
+            return done[0][0].summary
+        parts = [f"### {run.agent} {run.run_id}\n{run.summary or ''}" for run, _ in done]
+        return "\n\n".join(parts) or None
+
+    def _end_plan(self, plan: Plan, status: str, error: str | None = None, note: str | None = None) -> None:
+        plan.status = status
+        plan.error = error or plan.error
+        plan.note = note or plan.note
+        plan.finished_at = self.clock()
+
+    def _item_trail(self, item: dict) -> dict:
+        out = {k: item[k] for k in ("id", "title", "files", "detail", "status") if item.get(k) not in (None, "", [])}
+        if item.get("reason"):
+            out["reason"] = item["reason"]
+        budget = PLAN_REPORT_CHARS * 2
+        trail = []
+        for step in item["trail"]:
+            entry = dict(step)
+            entry["summary"] = clip(entry["summary"], max(500, budget // max(1, len(item["trail"]))))
+            trail.append(entry)
+        out["trail"] = trail
+        return out
+
+    def _plan_report(self, plan: Plan, problems: list, roster: Roster, early: str | None = None) -> dict:
+        body: dict[str, Any] = {"plan_id": plan.plan_id, "status": plan.status}
+        end = plan.finished_at if plan.finished_at is not None else self.clock()
+        body["duration_seconds"] = round(end - plan.started_at, 1)
+        stages = list(plan.stats)
+        if plan.status == "cancelled":
+            stages += [{"name": st["name"], "cancelled": True} for st in plan.stages[len(plan.stats):]]
+        if plan.status == "running":
+            stage = plan.stages[plan.stage_index]
+            total = len(plan.current) + len(plan.done) + len(plan.queue)
+            stages.append({"name": stage["name"], "runs": total, "finished": len(plan.done), "running": True})
+            stages += [{"name": s["name"], "pending": True} for s in plan.stages[plan.stage_index + 1:]]
+            body["progress"] = (f"stage {plan.stage_index + 1}/{len(plan.stages)} '{stage['name']}': "
+                                f"{len(plan.done)}/{total} runs finished, {len(plan.items)} items so far")
+        body["stages"] = stages
+        items = []
+        for item in plan.items.values():
+            line = {"id": item["id"], "title": clip(item["title"], 200), "status": item["status"]}
+            if item.get("reason"):
+                line["reason"] = clip(item["reason"], 200)
+            items.append(line)
+        if plan.error:
+            body["error"] = clip(plan.error, 1_500)
+        if plan.note:
+            body["note"] = clip(plan.note, 500)
+        while items and len(json.dumps(items, ensure_ascii=False)) > PLAN_REPORT_CHARS - 2_500:
+            items.pop()
+        if items:
+            body["items"] = items
+        if len(items) < len(plan.items):
+            body["more_items"] = len(plan.items) - len(items)
+        if plan.status == "succeeded" and plan.final:
+            while body.get("items") and PLAN_REPORT_CHARS - len(json.dumps(body, ensure_ascii=False)) < 2_000:
+                body["items"].pop()
+                body["more_items"] = body.get("more_items", 0) + 1
+            room = PLAN_REPORT_CHARS - len(json.dumps(body, ensure_ascii=False)) - 40
+            if room > 200:
+                body["final"] = clip(plan.final, room)
+        out: dict[str, Any] = {"ok": True, "plan": body}
+        if plan.status == "running" and early == "interrupted":
+            out["next"] = "Stopped waiting after an interrupt; the plan is paused until agents_status(plan_id=...)."
+        elif plan.status == "running":
+            out["next"] = ("The plan keeps going only while you wait: call agents_status with plan_id and "
+                           "wait_seconds (a few minutes) to continue it.")
+            if early == "new_message":
+                out["next"] = "Stopped waiting because a new user message arrived. " + out["next"]
+        else:
+            plan.reported = True
+            out["next"] = "agents_status with plan_id and item gives one item's full trail."
         notes = list(problems or [])
         if roster is not None and roster.problems:
             notes.append(f"{len(roster.problems)} agent file problem(s); /crew lists them.")
@@ -1038,6 +1467,9 @@ _PROMPT_TAIL = [
     "- Mechanical fan-out: whole-document checks and extractions (language or lint MCP checks over a file, "
     "page extraction) go to one worker per file or URL, in parallel, over the COMPLETE input. Do not sample "
     "excerpts inline to save calls; a short text (under ~1,000 characters) you may check inline.",
+    "- Plans for big jobs: when a task splits into many independent items (roughly 5 or more files, findings "
+    "or pages) that each go through the same steps, pass agents_run a plan (stages such as scan, verify, fix, "
+    "check) instead of chaining calls; you read only the final result. Small jobs stay tasks or your own work.",
     "- Skip agents for small lookups: every agent starts with a fresh context.",
     "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
     "what you already know). Treat their reports as evidence to check, not as facts. Runs that outlive the "

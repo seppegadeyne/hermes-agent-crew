@@ -1,5 +1,5 @@
 name: hermes-agent-crew
-version: 0.6.0
+version: 0.7.0
 description: "Named subagents for Hermes on any provider, local models included: strong models review, balanced models build, fast models swarm. The lead is the session's own model. Agents are Markdown files (the Claude Code agent format) with a fixed tier or model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone
@@ -70,6 +70,11 @@ config_schema:
     default: 8
     label: Scouting nudge
     description: After this many read or search calls by the lead in one turn without agents, add a one-time hint to use read-only agents (0 turns it off, max 50).
+  plan_max_items:
+    type: int
+    default: 24
+    label: Items per plan stage
+    description: Most findings one plan stage may fan out over (1-64). A stage that finds more fails and lists them, so the lead can split the job.
   prompt_section:
     type: bool
     default: true

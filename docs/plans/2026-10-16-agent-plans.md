@@ -1,6 +1,6 @@
 # Open agent pool, new name, and agent plans
 
-Status: Part A built (0.6.0, see CHANGELOG); Part B still a plan. Draft v4. Both parts were checked against the code by the Opus reviewer on 2026-10-16
+Status: Part A built and rolled out (0.6.0); Part B built (0.7.0, see CHANGELOG), measurement pending. Draft v4. Both parts were checked against the code by the Opus reviewer on 2026-10-16
 (see "Review outcome" at the end of each part). Nothing is built yet.
 
 Two releases, in this order, so the rename happens once and plans ship under the new name:

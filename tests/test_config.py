@@ -42,11 +42,12 @@ def test_builtin_agents_have_a_trigger(hermes_home):
     assert all(roster.agents[n].use_when for n in ("builder", "explorer", "researcher", "reviewer"))
 
 
-def test_builtin_roster_has_the_four_roles(hermes_home):
+def test_builtin_roster_has_the_five_roles(hermes_home):
     settings, problems = defaults()
     roster = cfg.load_roster(settings, hermes_home)
     assert problems == [] and roster.problems == []
-    assert set(roster.agents) == {"reviewer", "explorer", "researcher", "builder"}
+    assert set(roster.agents) == {"reviewer", "explorer", "researcher", "builder", "verifier"}
+    assert (roster.agents["verifier"].model, roster.agents["verifier"].readonly) == ("sonnet", True)
     assert (roster.agents["reviewer"].model, roster.agents["reviewer"].readonly) == ("opus", True)
     assert (roster.agents["explorer"].model, roster.agents["explorer"].readonly) == ("haiku", True)
     assert (roster.agents["researcher"].model, roster.agents["researcher"].readonly) == ("haiku", True)
@@ -168,7 +169,8 @@ def test_builtin_agents_use_tiers_and_default_to_todays_models(hermes_home):
     roster = cfg.load_roster(settings, hermes_home)
     routes = {name: (spec.tier, spec.model, spec.provider) for name, spec in roster.agents.items()}
     assert routes == {"reviewer": ("strong", "opus", DIRECT), "builder": ("balanced", "sonnet", DIRECT),
-                      "explorer": ("fast", "haiku", DIRECT), "researcher": ("fast", "haiku", DIRECT)}
+                      "explorer": ("fast", "haiku", DIRECT), "researcher": ("fast", "haiku", DIRECT),
+                      "verifier": ("balanced", "sonnet", DIRECT)}
 
 
 def test_default_tiers_keep_provider_inherit(hermes_home):

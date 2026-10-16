@@ -104,9 +104,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "summary_max_chars": 12_000,
     "prompt_section": True,
     "nudge_after": 8,
+    "plan_max_items": 24,
 }
 INT_RANGES = {
     "nudge_after": (0, 50),
+    "plan_max_items": (1, 64),
     "max_parallel": (1, 16),
     "max_live_runs": (1, 32),
     "max_parallel_writers": (0, 8),

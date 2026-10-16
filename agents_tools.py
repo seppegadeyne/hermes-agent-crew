@@ -38,6 +38,37 @@ _TASK = {
 }
 
 
+_STAGE = {
+    "type": "object",
+    "properties": {
+        **{k: v for k, v in _TASK["properties"].items()},
+        "name": {"type": "string", "description": "Unique stage name (lowercase), used by for_each and in item ids."},
+        "split": {"type": "array", "items": {"type": "string"},
+                  "description": "One run per entry (a folder, file or page); the entry is added to the goal as "
+                                 "'Your part: ...'. Not together with for_each."},
+        "for_each": {"type": "string",
+                     "description": "Name of an earlier stage: run over the findings (items) it produced, each "
+                                    "item in the run's context. A writer's write_scope comes from the items' files."},
+        "per_run": {"type": "integer", "minimum": 1, "maximum": 8,
+                    "description": "Items per run in a for_each stage (default 1; batch verify stages, e.g. 4)."},
+        "verify": {"type": "boolean",
+                   "description": "This for_each stage (a read-only agent) confirms or rejects the items; only "
+                                  "confirmed ones go on."},
+    },
+    "required": ["name", "agent", "goal"],
+}
+_PLAN = {
+    "type": "object",
+    "description": ("A plan for big jobs: stages run one after another inside the plugin, each fanning out in "
+                    "parallel; you get one compact result. Instead of tasks, never together."),
+    "properties": {
+        "workdir": {"type": "string", "description": "Default absolute workdir for every stage."},
+        "stages": {"type": "array", "minItems": 1, "maxItems": 8, "items": _STAGE},
+    },
+    "required": ["stages"],
+}
+
+
 def schema(name: str, description: str = "") -> dict:
     if name == "agents_run":
         return {"name": name, "description": description, "parameters": {
@@ -46,22 +77,27 @@ def schema(name: str, description: str = "") -> dict:
                 "tasks": {"type": "array", "minItems": 1, "maxItems": _TASKS_MAX, "items": _TASK,
                           "description": "One entry per agent run; entries run in parallel (the operator's "
                                          "max_parallel setting may allow fewer per call)."},
+                "plan": _PLAN,
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": _WAIT_MAX,
                                  "description": "How long to wait for results before returning run_ids "
                                                 "(default from settings, capped below Hermes' tool deadline)."},
             },
-            "required": ["tasks"],
+            "required": [],
         }}
     return {"name": name, "description": (
         "Check, wait for or cancel agent runs started by agents_run in this conversation. Without run_ids it "
-        "returns every run whose result you have not seen yet."), "parameters": {
+        "returns every run whose result you have not seen yet. With plan_id it continues and reports a plan "
+        "(a plan only moves on while you wait), or with item gives one item's full trail."), "parameters": {
         "type": "object",
         "properties": {
             "run_ids": {"type": "array", "items": {"type": "string"},
                         "description": "Runs to check; omit for all unreported runs."},
             "wait_seconds": {"type": "integer", "minimum": 0, "maximum": _WAIT_MAX,
                              "description": "Wait up to this long for unfinished runs (default 0)."},
-            "cancel": {"type": "boolean", "description": "Cancel the runs named in run_ids."},
+            "plan_id": {"type": "string",
+                        "description": "A plan started by agents_run: continue, report or cancel it."},
+            "item": {"type": "string", "description": "With plan_id: one item id; returns that item's full trail."},
+            "cancel": {"type": "boolean", "description": "Cancel the runs named in run_ids, or the plan in plan_id."},
             "reason": {"type": "string", "description": "Why they are cancelled."},
         },
         "required": [],

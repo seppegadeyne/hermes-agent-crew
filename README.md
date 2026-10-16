@@ -32,6 +32,7 @@ Children run through Hermes' public subagent lifecycle API: no core patch, no fo
 | `reviewer` | strong (opus) | read-only | plan checks, repeated failures, done checks (`attach_diff: true`) |
 | `explorer` | fast (haiku) | read-only | finding files, symbols, call sites and config; several in parallel |
 | `researcher` | fast (haiku) | read-only | library, API and spec documentation, quoted with URLs |
+| `verifier` | balanced (sonnet) | read-only | independent check of findings; the verify stage of a plan |
 | `builder` | balanced (sonnet) | can change files | one scoped, well-specified change plus its tests; parallel with disjoint `write_scope` |
 
 Built-in agents name a tier, not a model. By default the tiers map to the `opus`, `sonnet` and
@@ -93,6 +94,44 @@ Scouting nudge: when the lead makes `nudge_after` (default 8) read or search cal
 without using agents, the plugin appends a one-line hint to that tool result that names the
 read-only agents. It fires once per turn, never for subagents, and never after the turn used
 agents.
+
+## Plans for big jobs
+
+When a task splits into many independent items that each go through the same steps, the lead can
+pass `agents_run` a `plan` instead of `tasks`. The plugin runs the stages one after another, feeds
+each stage's findings into the next, and returns one compact result (at most about 8,000
+characters). The lead pays for the plan and the final result, not for every report in between.
+
+```json
+{"plan": {"workdir": "/srv/app", "stages": [
+  {"name": "scan", "agent": "explorer", "goal": "Find every call of parse_date().", "split": ["src/api/", "src/web/"]},
+  {"name": "verify", "agent": "verifier", "goal": "Check the findings.", "for_each": "scan", "verify": true, "per_run": 4},
+  {"name": "fix", "agent": "builder", "goal": "Replace the call and run its tests.", "for_each": "verify"},
+  {"name": "check", "agent": "reviewer", "goal": "Done check of the replacements.", "attach_diff": true}
+]}}
+```
+
+- A stage has the task fields plus `name`, and optionally `split` (one run per entry), `for_each`
+  (one run per item of an earlier stage, `per_run` items per run) and `verify`.
+- A stage that a later stage reads ends its report with a fenced json block of items
+  (`title`, `files`, `detail`); the plugin adds that rule to the run and numbers the items
+  (`scan-1`, ...). A run without the block fails the plan loudly, quoting the end of its report.
+- `verify: true` (read-only agents only) keeps the items the verifier confirmed; anything it
+  rejects or leaves out is rejected, with the reason in the result. The built-in `verifier` agent is
+  meant for this.
+- A writer stage gets each run's `write_scope` from its items' `files`. Those paths must resolve
+  inside the workdir (files, or folders at most two levels down); an item that breaks this is
+  `refused_scope` and never fixed. Writers with disjoint scopes run in parallel; items without files
+  run as unscoped writers, one at a time.
+- A stage with no items ends the plan early (`succeeded`, later stages `skipped`); a failed run
+  stops it.
+- No background work: a plan moves on only while the lead waits in `agents_run` or `agents_status`.
+  When the wait ends first, the result has a one-line `progress` and the lead continues with
+  `agents_status(plan_id=..., wait_seconds=...)`. `agents_status(plan_id=..., item="scan-3")` returns
+  one item's full trail; `cancel: true` with a `plan_id` cancels the plan. One live plan per
+  conversation.
+- `plan_max_items` (default 24) caps the items one stage may fan out over; a stage that finds more
+  fails and lists them so the lead can split the job.
 
 ## Agent files
 
@@ -166,6 +205,7 @@ plugins:
 | `wait_seconds` | `600` | Default wait, always capped below the tool deadline. |
 | `diff_max_chars` | `20000` | Largest diff attached with `attach_diff`. |
 | `summary_max_chars` | `12000` | Longest report returned per run. |
+| `plan_max_items` | `24` | Most items one plan stage may fan out over (1-64). |
 | `prompt_section` | `true` | Add the roster and a short usage guide to the lead's system prompt. |
 | `nudge_after` | `8` | After this many read or search calls by the lead in one turn without agents, append a one-time hint to use read-only agents. `0` turns it off. |
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.0 (2026-10-16)
+
+Agent plans: the lead writes a big job once as stages, and the plugin runs them one after another
+inside the lead's own `agents_run` / `agents_status` waits. Expected effect on the plugin goals: a
+scan -> verify -> fix -> check job no longer passes every intermediate report through the lead's
+context (up to 60,000 characters per stage before); the lead reads one result of at most about
+8,000 characters and asks for one item's trail when it needs more. Stages also start without a
+lead reasoning step in between. Measured once (8-file rename in a test repo, sonnet lead, haiku
+scout, 8 sonnet builders, opus reviewer; both runs changed all 8 files and were approved): the lead
+processed about 64k tokens with a plan against 115k chained (-45%), with 762 against 1,921 output
+tokens and 3 against 5 API calls; wall clock 73 s against 69 s (one sample each, within noise).
+All sessions together used about 15% more tokens with the plan, mostly builders that re-read files
+(3-5 API calls each against 3). Script: research/hermes-update/20261016-agent-crew-070/measure.sh.
+
+- `agents_run` takes `plan` as an alternative to `tasks`: up to 8 stages with the task fields plus
+  `name`, `split`, `for_each`, `per_run` and `verify`. Validation happens before anything starts.
+- Stages hand over items through a fenced json block the plugin asks for; ids are assigned by the
+  plugin and duplicates dropped. A missing block fails the plan with the end of the report quoted.
+- Verify stages keep only confirmed items; silence counts as rejected. New built-in read-only
+  `verifier` agent (balanced tier).
+- Writer stages take `write_scope` from item files, which must stay inside the workdir
+  (`refused_scope` otherwise). Runs launch in waves under the existing admission lock, through the
+  existing `_launch` and `_check_writers`; a writer that does not fit waits for the next wave.
+- No background thread: plans advance only while the lead waits. `agents_status` gets `plan_id`
+  (continue, report, cancel) and `item` (one item's full trail). Plan runs never show up as
+  unreported runs.
+- `plan_max_items` setting (default 24). A prompt guide line tells the lead when a plan pays off.
+- `_parse_task` extracted from `_parse_tasks` (no behavior change).
+
 ## 0.6.0 (2026-10-16)
 
 The plugin is now provider-neutral: any model Hermes can reach can be an agent, local endpoints

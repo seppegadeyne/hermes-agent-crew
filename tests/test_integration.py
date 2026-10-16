@@ -285,3 +285,42 @@ def test_endpoint_lookup_and_probe_against_a_real_socket(hermes_home):
         assert HermesHost.endpoint_up(url, timeout=2) is False
     finally:
         server.shutdown()
+
+
+def test_two_stage_plan_through_the_real_lifecycle(loaded, monkeypatch):
+    """scan -> verify through Hermes' real loader, tool registry and lifecycle API; only child runs are stubbed."""
+    from agent.subagent_lifecycle import bind_subagent_parent
+    from tools import delegate_tool
+    from tools.registry import registry
+
+    monkeypatch.setattr(delegate_tool, "_resolve_delegation_credentials", lambda cfg, parent: {
+        "model": cfg.get("model") or None, "provider": cfg.get("provider") or None,
+        "base_url": "process://x" if cfg.get("provider") else None,
+        "api_key": "placeholder" if cfg.get("provider") else None,
+        "api_mode": "chat_completions" if cfg.get("provider") else None}, raising=False)
+    built = []
+
+    def build(**kwargs):
+        built.append(kwargs)
+        return SimpleNamespace(_subagent_id=f"sa-0-plan{len(built):04d}", provider=DIRECT, model=kwargs.get("model"),
+                               _delegate_role="leaf", _delegate_depth=1, session_id=f"child-plan-{len(built)}")
+
+    def run_child(task_index, goal, child, parent):
+        if "## Items" in (built[int(child._subagent_id[-4:]) - 1]["context"] or ""):
+            return {"status": "completed", "summary": 'ok\n```json\n{"items": [{"id": "scan-1"}], "rejected": []}\n```'}
+        return {"status": "completed", "summary": 'found\n```json\n{"items": [{"title": "off by one in mean"}]}\n```'}
+
+    monkeypatch.setattr(delegate_tool, "_build_child_preserving_parent_tools", build)
+    monkeypatch.setattr(delegate_tool, "_run_child_lifecycle", run_child)
+    parent = SimpleNamespace(session_id="lead", provider=DIRECT, model="sonnet", enabled_toolsets=None,
+                             _delegate_depth=0)
+    entry = registry.get_entry("agents_run", scope=loaded.manager.scope_key)
+    plan = {"stages": [{"name": "scan", "agent": "explorer", "goal": "Find bugs in stats.py."},
+                       {"name": "verify", "agent": "verifier", "goal": "Check them.", "for_each": "scan",
+                        "verify": True}]}
+    with bind_subagent_parent(parent):
+        out = json.loads(entry.handler({"plan": plan, "wait_seconds": 30}, session_id="lead"))
+    assert out["ok"] and out["plan"]["status"] == "succeeded", out
+    assert out["plan"]["items"] == [{"id": "scan-1", "title": "off by one in mean", "status": "confirmed"}]
+    assert [k["model"] for k in built] == ["haiku", "sonnet"]
+    assert "ONE fenced ```json block" in built[0]["context"] and "You verify the findings" in built[1]["context"]
