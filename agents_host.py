@@ -92,6 +92,28 @@ class HermesHost:
             return None
 
     @staticmethod
+    def mcp_read_only(name: str) -> bool:
+        """True when the MCP server that registered ``name`` marked that tool readOnlyHint=True.
+
+        Reads the discovery data Hermes keeps for its untrusted-server gate. Unknown, missing or moved
+        internals mean False: the tool is treated as one that changes things.
+        """
+        try:
+            from tools import mcp_tool as core
+            from tools.mcp_tool_schema import mcp_prefixed_tool_name
+            from tools.mcp_tool_scope import _resolve_server_key
+            server = core._mcp_tool_server_names.get(name)
+            if not server:
+                return False
+            hints = core._tool_read_only_hints.get(_resolve_server_key(server), {})
+            # Every recorded name that maps to this registry name must be read-only: the hints are never
+            # pruned, and `get-x` and `get_x` sanitize alike, so one stale True must not let a writer through.
+            flags = [flag for raw, flag in list(hints.items()) if mcp_prefixed_tool_name(server, raw) == name]
+            return bool(flags) and all(flag is True for flag in flags)
+        except Exception:
+            return False
+
+    @staticmethod
     def spawn_paused() -> bool:
         try:
             from tools.delegate_tool_registry import is_spawn_paused

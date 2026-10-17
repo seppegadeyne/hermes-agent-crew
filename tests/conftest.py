@@ -148,6 +148,7 @@ class FakeHost:
         self.endpoints = {}  # provider -> base_url of a named custom endpoint
         self.down = set()    # base_urls that do not answer
         self.probes = []
+        self.mcp_reads = set()  # MCP tools whose server marked them readOnlyHint=True
         self.repo = home
         self.toolsets = {
             "read_file": "file", "search_files": "file", "write_file": "file", "patch": "file",
@@ -176,6 +177,9 @@ class FakeHost:
 
     def toolset_for_tool(self, name):
         return self.toolsets.get(name)
+
+    def mcp_read_only(self, name):
+        return name in self.mcp_reads
 
     def spawn_paused(self):
         return self.paused

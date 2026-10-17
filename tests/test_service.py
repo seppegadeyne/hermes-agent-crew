@@ -53,6 +53,41 @@ def test_read_only_child_is_guarded_before_launch_returns(rig):
     assert rig.service.pre_tool_call(tool_name="agents_run", task_id=sid)["action"] == "block"
 
 
+def test_read_only_agents_get_the_profiles_read_only_mcp_tools(rig):
+    rig.host.mcp_reads = {"mcp__docs__search", "mcp__ads__report"}
+    rig.host.settings = {"readonly_mcp_tools": ["mcp__lang__check_*"]}
+    run(rig, [{"agent": "researcher", "goal": "look it up"}], wait_seconds=0)
+    sid = "sa-0-00000000"
+    for name in ("mcp__docs__search", "mcp__ads__report", "mcp__lang__check_text"):
+        assert rig.service.pre_tool_call(tool_name=name, task_id=sid) is None, name
+    blocked = rig.service.pre_tool_call(tool_name="mcp__ads__set_budget", task_id=sid)
+    assert blocked["action"] == "block" and "not marked as a read-only MCP tool" in blocked["message"]
+    assert rig.service.pre_tool_call(tool_name="terminal", task_id=sid)["action"] == "block"
+    assert "MCP tools that only read" in rig.lifecycle.requests[0].context
+
+
+def test_read_only_mcp_access_can_be_switched_off_and_skips_explicit_tool_lists(rig):
+    rig.host.mcp_reads = {"mcp__docs__search"}
+    rig.host.settings = {"readonly_mcp": False}
+    run(rig, [{"agent": "explorer", "goal": "map it"}], wait_seconds=0)
+    assert rig.service.pre_tool_call(tool_name="mcp__docs__search", task_id="sa-0-00000000")["action"] == "block"
+    assert "MCP tools that only read" not in rig.lifecycle.requests[0].context
+    rig.host.settings = {}
+    (rig.home / "claude-agents").mkdir(exist_ok=True)
+    (rig.home / "claude-agents" / "narrow.md").write_text(
+        "---\nname: narrow\ndescription: d\nreadonly: true\ntools: [read_file]\n---\nbody\n")
+    run(rig, [{"agent": "narrow", "goal": "x"}], wait_seconds=0)
+    assert rig.service.pre_tool_call(tool_name="mcp__docs__search", task_id="sa-0-00000001")["action"] == "block"
+
+
+def test_bad_readonly_mcp_tools_setting_is_ignored_with_a_problem():
+    from hermes_agent_crew.agents_config import read_settings
+    settings, problems = read_settings(lambda key, default: {"readonly_mcp_tools": ["terminal"]}.get(key, default))
+    assert settings["readonly_mcp_tools"] == [] and any("readonly_mcp_tools" in p for p in problems)
+    settings, problems = read_settings(lambda key, default: {"readonly_mcp_tools": ["mcp__ads__*"]}.get(key, default))
+    assert settings["readonly_mcp_tools"] == ["mcp__ads__*"] and any("every tool" in p for p in problems)
+
+
 def test_policy_registered_even_without_the_start_hook(rig):
     rig.lifecycle.fire_start_hook = False
     run(rig, [{"agent": "explorer", "goal": "map it"}], wait_seconds=0)

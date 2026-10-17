@@ -12,6 +12,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,14 +67,17 @@ class ChildPolicy:
     allowed: frozenset | None = None  # exact tool names; None = no per-tool limit
     globs: tuple = ()
     scopes: tuple = ()  # normalized absolute paths a scoped writer may change; () = no path limit
+    # Extra MCP tools on top of the list: True for a tool the profile marks read-only. Called only for
+    # mcp__ names this agent's list does not cover; an error blocks the call (the caller fails closed).
+    mcp_read: Callable[[str], bool] | None = None
 
     @classmethod
-    def for_spec(cls, spec: Any, scopes: tuple = ()) -> ChildPolicy:
+    def for_spec(cls, spec: Any, scopes: tuple = (), mcp_read: Callable[[str], bool] | None = None) -> ChildPolicy:
         if spec.tools is None:
             return cls(spec.name, spec.readonly, scopes=tuple(scopes))
         exact = frozenset(t for t in spec.tools if not _GLOB_CHARS & set(t))
         globs = tuple(t for t in spec.tools if _GLOB_CHARS & set(t))
-        return cls(spec.name, spec.readonly, exact, globs, tuple(scopes))
+        return cls(spec.name, spec.readonly, exact, globs, tuple(scopes), mcp_read)
 
     def decide(self, tool_name: str, args: Any = None) -> str | None:
         """Block message for a tool call, or None to let it through."""
@@ -88,13 +92,20 @@ class ChildPolicy:
             return None
         if tool_name in self.allowed or any(fnmatch.fnmatchcase(tool_name, g) for g in self.globs):
             return None
+        if self.mcp_read is not None and tool_name.startswith("mcp__") and self.mcp_read(tool_name) is True:
+            return None
         usable = ", ".join(sorted(self.allowed)[:14] + list(self.globs)) or "none"
+        if self.mcp_read is not None:
+            usable += ", and the read-only MCP tools of this profile"
         if tool_name == "tool_call":
             # Hermes unwraps a valid single tool_call before this check and checks the real tool; what lands
             # here is a connector batch, an out-of-scope tool or arguments that failed the schema probe.
             return (f"hermes-agent-crew: this tool_call was blocked for agent '{self.agent}': it is a batch, or "
                     "it did not resolve to a tool this agent may use. Send one entry per tool_call, with the exact "
                     f"name and arguments from tool_describe. Usable tools: {usable}.")
+        if self.readonly and tool_name.startswith("mcp__") and self.mcp_read is not None:
+            return (f"hermes-agent-crew: agent '{self.agent}' is read-only and '{tool_name}' is not marked as a "
+                    "read-only MCP tool in this profile, so it is blocked. Report what you would need instead.")
         if self.readonly:
             return (f"hermes-agent-crew: agent '{self.agent}' is read-only, so '{tool_name}' is blocked. "
                     f"Usable tools: {usable}. Investigate and report instead of changing anything.")

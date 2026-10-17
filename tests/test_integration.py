@@ -132,6 +132,25 @@ def test_scouting_nudge_through_the_real_result_hook(loaded):
     assert "[hermes-agent-crew] 8 separate reads/searches" in out[7] and "explorer" in out[7]
 
 
+def test_host_reads_the_mcp_read_only_hints_hermes_recorded(loaded, monkeypatch):
+    from tools import mcp_tool as core
+    from tools.mcp_tool_scope import _resolve_server_key
+
+    from hermes_agent_crew.agents_host import HermesHost as Host
+
+    key = _resolve_server_key("docs-srv")
+    monkeypatch.setitem(core._mcp_tool_server_names, "mcp__docs_srv__search", "docs-srv")
+    monkeypatch.setitem(core._mcp_tool_server_names, "mcp__docs_srv__publish", "docs-srv")
+    monkeypatch.setitem(core._tool_read_only_hints, key, {"search": True, "publish": False})
+    assert Host.mcp_read_only("mcp__docs_srv__search") is True
+    assert Host.mcp_read_only("mcp__docs_srv__publish") is False
+    assert Host.mcp_read_only("mcp__unknown__tool") is False
+    # A stale read-only entry that sanitizes to the same name as a write tool must not open it.
+    monkeypatch.setitem(core._mcp_tool_server_names, "mcp__docs_srv__get_x", "docs-srv")
+    monkeypatch.setitem(core._tool_read_only_hints, key, {"get-x": True, "get_x": False})
+    assert Host.mcp_read_only("mcp__docs_srv__get_x") is False
+
+
 def _stub_child(monkeypatch, built):
     from tools import delegate_tool
 

@@ -12,6 +12,7 @@ list). On top of that this module adds what a lead model needs:
 from __future__ import annotations
 
 import contextvars
+import fnmatch
 import json
 import os
 import shlex
@@ -640,7 +641,7 @@ class AgentsService:
         # list), so a build that refuses those toolsets gets one retry without them. Narrowing from an
         # explicit `toolsets:` key is the only restriction an unguarded agent has: no retry there.
         retry_without_toolsets = "allowed_toolsets" in kwargs and not spec.toolsets and spec.tools is not None
-        intent = _Intent(ChildPolicy.for_spec(spec, task.get("write_scope", ())))
+        intent = _Intent(ChildPolicy.for_spec(spec, task.get("write_scope", ()), self._mcp_reader(spec, settings)))
         token = self._intent.set(intent)
         try:
             try:
@@ -679,7 +680,9 @@ class AgentsService:
                          "to tools. It replaces any other workspace path you were given.")
         if spec.readonly:
             rules.append("- You are read-only. Tools that change files, run commands or start other agents are "
-                         "blocked: investigate and report instead.")
+                         "blocked: investigate and report instead."
+                         + (" MCP tools that only read (marked read-only in this profile) work; the others are "
+                            "blocked." if self._mcp_reader(spec, settings) is not None else ""))
         if task.get("write_scope"):
             rules.append("- Your write scope: " + ", ".join(task["write_scope"]) + ". Change files only there, "
                          "and always pass ABSOLUTE paths to write_file and patch (relative paths are blocked). "
@@ -707,6 +710,17 @@ class AgentsService:
         if diff:
             parts.append(diff)
         return clip("\n\n".join(parts), CONTEXT_BUDGET)
+
+    def _mcp_reader(self, spec: AgentSpec, settings: dict) -> Callable[[str], bool] | None:
+        """For a read-only agent on the default tool list: which MCP tools it may call on top of it."""
+        if not spec.mcp_reads or not settings.get("readonly_mcp"):
+            return None
+        marked = tuple(settings.get("readonly_mcp_tools") or ())
+        host = self.host
+
+        def read_only(name: str) -> bool:
+            return any(fnmatch.fnmatchcase(name, g) for g in marked) or host.mcp_read_only(name) is True
+        return read_only
 
     def _child_toolsets(self, spec: AgentSpec, parent: Any) -> tuple | None:
         """Narrow the child's tool schema to what the agent may use; the guard is what enforces it."""
@@ -1694,8 +1708,8 @@ _PROMPT_TAIL = [
     "check) instead of chaining calls; you read only the final result. Small jobs stay tasks or your own work.",
     "- Skip agents for small lookups: every agent starts with a fresh context.",
     "- Read-only agents have no shell: they cannot run scripts, curl, probes or tests, and cannot save notes. "
-    "Ask them only for what their tools can show; work that must execute goes to a writer with a write_scope "
-    "or stays with you.",
+    "They can call the profile's read-only MCP tools (reports, docs, search APIs), so send big MCP reads to "
+    "them. Work that must execute goes to a writer with a write_scope or stays with you.",
     "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
     "what you already know). Treat their reports as evidence to check, not as facts. Runs that outlive the "
     "wait come back as run_ids for agents_status.",

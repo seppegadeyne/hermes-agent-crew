@@ -39,6 +39,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]{0,127}$")
 PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 TOOL_RE = re.compile(r"^[A-Za-z0-9_*?-]{1,96}$")
+MCP_TOOL_GLOB_RE = re.compile(r"^mcp__[A-Za-z0-9_*?\[\]-]{1,120}$")
 TOOLSET_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
@@ -105,6 +106,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "prompt_section": True,
     "nudge_after": 8,
     "plan_max_items": 24,
+    "readonly_mcp": True,
+    "readonly_mcp_tools": [],
 }
 INT_RANGES = {
     "nudge_after": (0, 50),
@@ -141,6 +144,9 @@ class AgentSpec:
     unreachable: bool = False             # set per launch: no route answered
     instructions: str = ""
     source: str = "builtin"
+    # A read-only agent without its own tool list may also use the profile's read-only MCP tools (the
+    # server's readOnlyHint, or settings.readonly_mcp_tools). An explicit tool list is kept as written.
+    mcp_reads: bool = False
 
 
 @dataclass
@@ -362,9 +368,11 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
         if inherited:
             raise ValueError(f"tier cannot be combined with {' or '.join(k + ': inherit' for k in inherited)}; "
                              "drop the tier to run on the lead's route")
+    mcp_reads = False
     if readonly:
         if tools is None:
             tools = tuple(sorted(READONLY_TOOLS))
+            mcp_reads = True
         else:
             # MCP tools are the operator's call: list only read-type MCP tools for a read-only agent.
             unsafe = [t for t in tools if t not in READONLY_TOOLS and not t.startswith("mcp__")]
@@ -377,7 +385,7 @@ def spec_from_markdown(text: str, *, source: str = "builtin",
     warnings.extend(f"ignored key {key!r}" for key in meta if key not in KNOWN_KEYS)
     spec = AgentSpec(name=name, description=description, use_when=use_when, model=model, provider=provider,
                      readonly=readonly, tools=tools, toolsets=toolsets, effort=effort, tier=tier, instructions=body,
-                     source=source)
+                     source=source, mcp_reads=mcp_reads)
     return spec, warnings
 
 
@@ -412,6 +420,19 @@ def read_settings(get_config: Callable[[str, Any], Any]) -> tuple[dict[str, Any]
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 problems.append("settings.agent_dirs must be a list of folder paths; using the default")
                 value = list(default)
+        elif key == "readonly_mcp_tools":
+            if isinstance(value, str):
+                value = [value]
+            if not isinstance(value, list) or not all(isinstance(v, str) and MCP_TOOL_GLOB_RE.match(v.strip())
+                                                      for v in value):
+                problems.append("settings.readonly_mcp_tools must be a list of MCP tool names or globs that start "
+                                "with mcp__; ignored")
+                value = []
+            value = [v.strip() for v in value]
+            broad = [v for v in value if re.fullmatch(r"mcp__(?:[A-Za-z0-9_-]+__)?\*", v)]
+            if broad:
+                problems.append("settings.readonly_mcp_tools opens every tool of a server or of all servers to "
+                                "read-only agents: " + ", ".join(broad) + " (allowed, but check that is meant)")
         elif key == "overrides":
             if not isinstance(value, Mapping):
                 problems.append("settings.overrides must be a mapping of agent name -> settings; ignored")

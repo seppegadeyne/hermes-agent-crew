@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 (2026-10-17)
+
+Read-only agents can use the profile's read-only MCP tools. Expected effect: big MCP reads (ad
+reports, analytics, docs, search APIs) move out of the lead's context into a scout's, which returns
+a compact report. In the sessions reviewed, one Google Ads analysis put about 515k characters of
+MCP output into the lead because no agent could call those tools.
+
+- A read-only agent without its own `tools:` list may call any MCP tool the server marked
+  `readOnlyHint: true` at discovery (the data Hermes keeps for its untrusted-server gate), plus
+  tools matched by the new `readonly_mcp_tools` setting (names or `mcp__` globs) for servers that
+  do not annotate. Every other MCP tool stays blocked, with a message that says why. An agent
+  with an explicit tool list keeps exactly that list. Off with `readonly_mcp: false`.
+- `readOnlyHint` is the server's own claim (Hermes only checks it for `trust: untrusted`
+  servers); the README says so and how to turn the access off. A tool counts as read-only only
+  when every recorded name that maps to it is marked, so a stale hint cannot open a write tool. A
+  `readonly_mcp_tools` glob that covers a whole server or all servers is reported under problems.
+- The child's brief and the lead's prompt say which MCP tools read-only agents can use.
+- The child's tool schema is not widened: the MCP toolsets come from Hermes' own
+  `inherit_mcp_toolsets`, and the guard decides per call.
+
 ## 0.8.2 (2026-10-17)
 
 From a review of a day of real sessions. Expected effect: fewer false nudges in turns where the lead

@@ -265,6 +265,8 @@ plugins:
 | `summary_max_chars` | `12000` | Longest report returned per run. |
 | `plan_max_items` | `24` | Most items one plan stage may fan out over (1-64). |
 | `prompt_section` | `true` | Add the roster and a short usage guide to the lead's system prompt. |
+| `readonly_mcp` | `true` | Read-only agents without a `tools:` list may call the profile's read-only MCP tools (see How read-only is enforced). |
+| `readonly_mcp_tools` | `[]` | Extra MCP tool names or globs (`mcp__server__get_*`) that count as read-only, for servers that do not set `readOnlyHint`. Only add tools that cannot change anything. |
 | `nudge_after` | `8` | After this many distinct reads or searches by the lead in one turn without agents, append a one-time hint to use read-only agents. `0` turns it off. |
 
 ### Model tiers
@@ -344,7 +346,17 @@ secrets. Notes:
   child can make its first tool call, and checks every call in `pre_tool_call`.
 - A read-only agent may use `read_file`, `search_files`, `web_search`, `web_extract`, `x_search`,
   `vision_analyze`, `session_search`, `skill_view`, `skills_list`, `todo_list`, `tool_search` and
-  `tool_describe`, plus MCP tools its file lists explicitly. An agent with a `tools:` list may
+  `tool_describe`, plus MCP tools its file lists explicitly. A read-only agent without its own
+  `tools:` list (explorer, researcher, reviewer, verifier) may also call every MCP tool of the
+  profile that is read-only: the server marked it `readOnlyHint: true` at discovery, or it matches
+  `readonly_mcp_tools`. Other MCP tools stay blocked; `readonly_mcp: false` turns this off.
+  `readOnlyHint` is the server's own claim, and Hermes does not check it for `trust: full`
+  servers: if you have a server you do not trust to label its tools honestly, set
+  `readonly_mcp: false` or give your read-only agents an explicit `tools:` list. Resource and
+  prompt helpers (`read_resource`, `list_prompts`, ...) carry no hint and need
+  `readonly_mcp_tools`. On a Hermes build without these discovery records, no MCP tool counts as
+  read-only (fails closed). An
+  agent with a `tools:` list may
   always use `tool_search` and `tool_describe`, so it can reach its deferred MCP tools; a call
   through `tool_call` is checked under the real tool's name. Everything else is blocked: file
   writes, `terminal`, `execute_code`, browser actions, memory, scheduling and unlisted MCP tools.
