@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.2 (2026-10-17)
+
+- The fixed text of the lead's prompt section is rewritten shorter, same instructions: 2,663 -> 1,965
+  characters. Expected effect: roughly 700 fewer characters in every lead turn, and more room
+  for the roster (5 agents now use about 3,075 of the 3,800-character section instead of 3,773, so
+  descriptions are no longer the first thing clipped). A test keeps the fixed text under
+  `FIXED_PROMPT_BUDGET` (2,100), so a later addition has to make room.
+
 ## 0.9.1 (2026-10-17)
 
 - The lead's prompt asks it to pass the paths of notes or knowledge-base pages it knows are relevant

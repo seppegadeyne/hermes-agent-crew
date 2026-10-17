@@ -1679,41 +1679,39 @@ def roster_line(spec: AgentSpec, description_chars: int = 90) -> str:
     return f"{trigger}. {_shorten(spec.description, description_chars)}".rstrip()
 
 
+# Fixed text of the lead's prompt section: paid on every lead turn, so every word must earn its place.
+# test_prompt_fixed_text_stays_within_budget holds it under FIXED_PROMPT_BUDGET, leaving the rest of
+# render_prompt's limit for the roster.
+FIXED_PROMPT_BUDGET = 2_100
 _PROMPT_HEAD = [
-    "Agents: named subagents for token-efficient delegation. You are the lead: you plan, decide and verify; "
-    "agents do bounded work in their own context and return compact reports, so your context stays small.",
+    "Agents: named subagents. You are the lead: you plan, decide and verify; they work in their own context and return "
+    "compact reports, so your context stays small.",
     "Roster:",
 ]
 _PROMPT_TAIL = [
     'Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", "workdir": '
-    '"/abs/path/to/repo"}]}. If it is a deferred tool, call it through tool_call with name "agents_run". '
-    "Several tasks in one call run in parallel. Set workdir to the folder the work is in; it defaults to this "
-    "session's working directory.",
+    '"/abs/path"}]} (if deferred: tool_call, name "agents_run"). Tasks in one call run in parallel. Set workdir '
+    "to the folder the work is in (default: this session's).",
     "When to use it:",
-    "- Swarm early: when a task needs more than a handful of reads or searches (unfamiliar code, several "
-    "areas, docs), send read-only scouts in ONE agents_run call, one task per question or area, before you "
-    "read it all yourself.",
-    "- Background work: a builder or a long review can run with wait_seconds 0 while you do your own part; "
-    "collect it later with agents_status.",
-    "- Parallel builders: give each writer a write_scope (the files or folders it may change, disjoint per "
-    "writer) and they run side by side; without one, writers run one at a time.",
-    "- Senior review on call: ask the reviewer (1) before you lock a multi-file plan, (2) when the same test or "
-    "build error fails twice, (3) before you call non-trivial work done; pass attach_diff: true so it reads "
-    "the diff itself.",
-    "- Mechanical fan-out: whole-document checks and extractions (language or lint MCP checks over a file, "
-    "page extraction) go to one worker per file or URL, in parallel, over the COMPLETE input. Do not sample "
-    "excerpts inline to save calls; a short text (under ~1,000 characters) you may check inline.",
-    "- Plans for big jobs: when a task splits into many independent items (roughly 5 or more files, findings "
-    "or pages) that each go through the same steps, pass agents_run a plan (stages such as scan, verify, fix, "
-    "check) instead of chaining calls; you read only the final result. Small jobs stay tasks or your own work.",
+    "- Swarm early: more than a handful of reads or searches? Send read-only scouts in ONE call, one task "
+    "per question or area, before you read it all yourself.",
+    "- Background: wait_seconds 0 for a builder or long review while you do your part; collect with "
+    "agents_status.",
+    "- Parallel builders: disjoint write_scope per writer; without one, writers run one at a time.",
+    "- Reviewer: before locking a multi-file plan, when the same error fails twice, before calling "
+    "non-trivial work done; pass attach_diff: true.",
+    "- Mechanical fan-out: whole-file checks and extractions (language or lint MCP, pages) go one worker per "
+    "file or URL, in parallel, over the COMPLETE input. Never check sampled excerpts inline to save calls; "
+    "under ~1,000 characters you may check inline.",
+    "- Plans for big jobs: 5+ independent items (files, findings, pages) through the same steps? Pass a plan "
+    "(scan, verify, fix, check) instead of chaining calls; you read only the final result.",
     "- Skip agents for small lookups: every agent starts with a fresh context.",
-    "- Read-only agents have no shell: they cannot run scripts, curl, probes or tests, and cannot save notes. "
-    "They can call the profile's read-only MCP tools (reports, docs, search APIs), so send big MCP reads to "
-    "them. Work that must execute goes to a writer with a write_scope or stays with you.",
-    "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
-    "what you already know, and the paths of notes or knowledge-base pages you know are relevant, so they read "
-    "those instead of searching). Treat their reports as evidence to check, not as facts. Runs that outlive the "
-    "wait come back as run_ids for agents_status.",
+    "- Read-only agents have no shell (no scripts, curl, probes, tests) and cannot save notes, but can call "
+    "the profile's read-only MCP tools: "
+    "send big MCP reads to them; work that must execute goes to a writer or stays with you.",
+    "Agents cannot see this conversation: give a complete goal and context (paths, constraints, what you "
+    "know, relevant note or knowledge-base paths so they read instead of search). Their reports are evidence "
+    "to check. Runs that outlive the wait come back as run_ids for agents_status.",
 ]
 
 

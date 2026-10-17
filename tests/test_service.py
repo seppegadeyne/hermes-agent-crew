@@ -475,6 +475,12 @@ def test_prompt_section_keeps_the_trigger_and_the_fan_out_rule(rig):
     assert "a whole text file" in rig.service.roster_text("lang-checker")
 
 
+def test_prompt_fixed_text_stays_within_budget():
+    from hermes_agent_crew import agents_service as svc
+    fixed = len("\n".join(svc._PROMPT_HEAD + svc._PROMPT_TAIL))
+    assert fixed <= svc.FIXED_PROMPT_BUDGET, f"fixed prompt text {fixed} > {svc.FIXED_PROMPT_BUDGET}: shorten it"
+
+
 def test_a_full_roster_keeps_every_trigger_and_the_usage_guide(rig):
     folder = rig.home / "claude-agents"
     folder.mkdir()
