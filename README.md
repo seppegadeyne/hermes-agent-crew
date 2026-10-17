@@ -133,10 +133,13 @@ whose result the lead has not seen yet.
 With tool search enabled, Hermes may defer both tools behind `tool_search`; the plugin's prompt
 section tells the model to call them through `tool_call` then.
 
-Scouting nudge: when the lead makes `nudge_after` (default 8) read or search calls in one turn
-without using agents, the plugin appends a one-line hint to that tool result that names the
-read-only agents. It fires once per turn, never for subagents, and never after the turn used
-agents.
+Scouting nudge: when the lead makes `nudge_after` (default 8) separate reads or searches in one
+turn without using agents, the plugin appends a one-line hint to that tool result that names the
+read-only agents. Repeated calls on the same target (paging one file, the same search or command)
+count once. It fires once per turn, never for subagents, and never after the turn used agents.
+
+Read-only agents have no shell. Goals that need commands (probes, scripts, tests) go to a writer
+with a `write_scope` or stay with the lead; the prompt section says so.
 
 ## Plans for big jobs
 
@@ -262,7 +265,7 @@ plugins:
 | `summary_max_chars` | `12000` | Longest report returned per run. |
 | `plan_max_items` | `24` | Most items one plan stage may fan out over (1-64). |
 | `prompt_section` | `true` | Add the roster and a short usage guide to the lead's system prompt. |
-| `nudge_after` | `8` | After this many read or search calls by the lead in one turn without agents, append a one-time hint to use read-only agents. `0` turns it off. |
+| `nudge_after` | `8` | After this many distinct reads or searches by the lead in one turn without agents, append a one-time hint to use read-only agents. `0` turns it off. |
 
 ### Model tiers
 

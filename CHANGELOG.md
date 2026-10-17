@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.2 (2026-10-17)
+
+From a review of a day of real sessions. Expected effect: fewer false nudges in turns where the lead
+pages through the file it is editing (no added tokens; the nudge only fires less often), and fewer
+wasted read-only runs whose goals need a shell, which the lead then has to redo by hand.
+
+- The scouting nudge counts distinct lookups per turn (file path, search, query, URL set or
+  command), not calls. Paging one file with offset/limit is one lookup. In the sessions reviewed,
+  both nudges fired while the lead read one 1,300-line script in chunks just before editing it.
+- The lead's prompt and the `agents_run` description now say that read-only agents cannot run
+  commands or save notes. Four researchers were asked to "test with plain urllib"; all four
+  reported they could not, and the lead redid the probes itself.
+
 ## 0.8.1 (2026-10-16)
 
 - `/crew` prints an aligned table (agent, tier, model @ provider, access, fallback routes marked

@@ -476,8 +476,13 @@ def test_roster_text_lists_agents_and_problems(rig):
     assert "No agent named 'ghost'" in rig.service.roster_text("ghost")
 
 
+_lookups = iter(range(1_000_000))
+
+
 def lead_result(rig, tool, args=None, turn="t1", session="lead-1", result='{"content": "x"}'):
-    return rig.service.on_transform_tool_result(tool_name=tool, args=args or {}, result=result, task_id=session,
+    if args is None:  # a fresh target each time: the nudge counts distinct lookups
+        args = {"path": f"/repo/f{next(_lookups)}.py", "query": f"q{next(_lookups)}"}
+    return rig.service.on_transform_tool_result(tool_name=tool, args=args, result=result, task_id=session,
                                                 session_id=session, turn_id=turn)
 
 
@@ -486,12 +491,24 @@ def test_nudge_fires_once_after_a_run_of_manual_scouting(rig):
         assert lead_result(rig, "read_file") is None
     assert lead_result(rig, "write_file") is None  # edits do not count
     hinted = lead_result(rig, "terminal", {"command": "cd /repo && grep -n foo src/*.py"})
-    assert hinted.startswith('{"content": "x"}\n\n[hermes-agent-crew] 8 read/search calls')
+    assert hinted.startswith('{"content": "x"}\n\n[hermes-agent-crew] 8 separate reads/searches')
     assert "explorer" in hinted and "agents_run" in hinted and "builder" not in hinted
     assert lead_result(rig, "read_file") is None  # once per turn
     for _ in range(7):
         assert lead_result(rig, "search_files", turn="t2") is None
     assert lead_result(rig, "web_search", turn="t2") is not None  # a new turn counts afresh
+
+
+def test_nudge_counts_distinct_lookups_not_pages_of_one_file(rig):
+    # Paging through the file the lead is about to edit is one lookup, not scout work.
+    for offset in range(1, 20):
+        assert lead_result(rig, "read_file", {"path": "/repo/big.py", "offset": offset * 200}) is None
+    assert lead_result(rig, "terminal", {"command": "grep -n foo /repo/big.py"}) is None
+    assert lead_result(rig, "terminal", {"command": "grep  -n foo   /repo/big.py"}) is None  # same command
+    for n in range(4):
+        assert lead_result(rig, "read_file", {"path": f"/repo/m{n}.py"}) is None
+    assert lead_result(rig, "web_search", {"query": "x"}) is None  # 7th distinct target
+    assert lead_result(rig, "web_extract", {"urls": ["https://a", "https://b"]}) is not None  # 8th
 
 
 def test_no_nudge_once_the_turn_delegates_or_for_other_commands(rig):

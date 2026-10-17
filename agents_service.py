@@ -63,6 +63,7 @@ _SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|", "&", ";;"})
 _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
+MAX_SEEN_LOOKUPS = 64            # distinct lookups remembered per turn; far above any nudge threshold
 LAUNCH_FAILURES = frozenset({"launch_failed", "endpoint_unavailable", "model_required", "provider_unsupported"})
 PLAN_REPORT_CHARS = 8_000        # the lead reads at most this much of a plan's result
 PLAN_TRAIL_CHARS = 4_000         # per run summary kept in an item's trail
@@ -268,7 +269,8 @@ class AgentsService:
         with self._lock:
             state = self._nudges.get(session_id)
             if state is None or state["turn"] != turn_id:
-                state = {"turn": turn_id, "count": 0, "done": False, "fanouts": 0, "plan_hint": False}
+                state = {"turn": turn_id, "count": 0, "done": False, "fanouts": 0, "plan_hint": False,
+                         "seen": set()}
                 self._nudges[session_id] = state
             self._nudges.move_to_end(session_id)
             while len(self._nudges) > MAX_NUDGE_SESSIONS:
@@ -279,6 +281,13 @@ class AgentsService:
             elif state["done"]:
                 return None
             else:
+                # Distinct targets, not calls: paging through one file (often the file the lead is about
+                # to edit) is one lookup, not the spread of reads a scout would take over.
+                key = _lookup_key(tool_name, args)
+                if key in state["seen"]:
+                    return None
+                if len(state["seen"]) < MAX_SEEN_LOOKUPS:
+                    state["seen"].add(key)
                 state["count"] += 1
             count = state["count"]
         if delegating:
@@ -1471,6 +1480,26 @@ class AgentsService:
         return render_prompt(roster)
 
 
+def _lookup_key(tool_name: str, args: Any) -> str:
+    """What one scouting call looked at, so repeated reads of the same target count once per turn."""
+    if not isinstance(args, dict):
+        return tool_name
+    if tool_name == "read_file":
+        target = args.get("path")  # offset and limit page through the same file
+    elif tool_name == "search_files":
+        target = f"{args.get('pattern')}\0{args.get('path')}\0{args.get('target')}"
+    elif tool_name == "web_extract":
+        urls = args.get("urls")
+        target = "\0".join(sorted(map(str, urls))) if isinstance(urls, list) else urls
+    elif tool_name == "web_search":
+        target = args.get("query")
+    elif tool_name == "terminal":
+        target = " ".join(str(args.get("command") or "").split())
+    else:
+        target = None
+    return f"{tool_name}\0{str(target)[:500]}"
+
+
 def _is_scouting(tool_name: str, args: Any) -> bool:
     if tool_name in SCOUT_TOOLS:
         return True
@@ -1599,7 +1628,7 @@ def _report_count(result: Any) -> int:
 
 def nudge_text(count: int, scouts: list) -> str:
     names = ", ".join(scouts[:4])
-    return (f"[hermes-agent-crew] {count} read/search calls by hand in this turn. If more lookups follow, "
+    return (f"[hermes-agent-crew] {count} separate reads/searches by hand in this turn. If more lookups follow, "
             f"send them to read-only agents ({names}) in ONE agents_run call, one task per question or area, "
             "and keep your own context for decisions. Keep going yourself if you are nearly done.")
 
@@ -1664,6 +1693,9 @@ _PROMPT_TAIL = [
     "or pages) that each go through the same steps, pass agents_run a plan (stages such as scan, verify, fix, "
     "check) instead of chaining calls; you read only the final result. Small jobs stay tasks or your own work.",
     "- Skip agents for small lookups: every agent starts with a fresh context.",
+    "- Read-only agents have no shell: they cannot run scripts, curl, probes or tests, and cannot save notes. "
+    "Ask them only for what their tools can show; work that must execute goes to a writer with a write_scope "
+    "or stays with you.",
     "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
     "what you already know). Treat their reports as evidence to check, not as facts. Runs that outlive the "
     "wait come back as run_ids for agents_status.",
@@ -1702,7 +1734,7 @@ def tool_description(roster: Roster) -> str:
     agents = sorted(roster.agents.values(), key=lambda s: s.name)
     names = ", ".join(agent_label(spec) for spec in agents[:10]) or "none configured yet"
     return ("Run named subagents from the operator's roster (each has a fixed model and tool set; read-only "
-            "agents cannot change anything) on self-contained tasks, in parallel, and get their compact final "
-            "reports. Agents cannot see this conversation: give each task a full goal and context. Results that "
-            "take longer than wait_seconds come back as run_ids for agents_status. Agents at startup: "
+            "agents cannot change anything or run commands) on self-contained tasks, in parallel, and get their "
+            "compact final reports. Agents cannot see this conversation: give each task a full goal and context. "
+            "Results that take longer than wait_seconds come back as run_ids for agents_status. Agents at startup: "
             f"{names}.")

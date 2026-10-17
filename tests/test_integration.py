@@ -126,10 +126,10 @@ def test_scouting_nudge_through_the_real_result_hook(loaded):
                              _delegate_depth=0)
     ids = _CallIds(task_id="lead", session_id="lead", tool_call_id="c", turn_id="turn-1", api_request_id="")
     with bind_subagent_parent(parent):
-        out = [_apply_transform_tool_result_hook("read_file", {"path": "x"}, '{"content": "x"}', 1, ids)
-               for _ in range(8)]
+        out = [_apply_transform_tool_result_hook("read_file", {"path": f"x{n}"}, '{"content": "x"}', 1, ids)
+               for n in range(8)]
     assert out[:7] == ['{"content": "x"}'] * 7
-    assert "[hermes-agent-crew] 8 read/search calls" in out[7] and "explorer" in out[7]
+    assert "[hermes-agent-crew] 8 separate reads/searches" in out[7] and "explorer" in out[7]
 
 
 def _stub_child(monkeypatch, built):
