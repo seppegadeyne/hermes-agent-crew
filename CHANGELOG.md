@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 (2026-10-17)
+
+- The lead's prompt asks it to pass the paths of notes or knowledge-base pages it knows are relevant
+  in a task's context. Expected effect: agents read the right page instead of searching a whole
+  knowledge base (in the sessions reviewed, scouts spent 3-6 calls each reading an index that held
+  nothing for their task). About 110 characters more in the lead's prompt; the roster budget
+  absorbs it.
+
 ## 0.9.0 (2026-10-17)
 
 Read-only agents can use the profile's read-only MCP tools. Expected effect: big MCP reads (ad

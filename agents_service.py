@@ -1711,7 +1711,8 @@ _PROMPT_TAIL = [
     "They can call the profile's read-only MCP tools (reports, docs, search APIs), so send big MCP reads to "
     "them. Work that must execute goes to a writer with a write_scope or stays with you.",
     "Agents cannot see this conversation, so give each one a complete goal and context (paths, constraints, "
-    "what you already know). Treat their reports as evidence to check, not as facts. Runs that outlive the "
+    "what you already know, and the paths of notes or knowledge-base pages you know are relevant, so they read "
+    "those instead of searching). Treat their reports as evidence to check, not as facts. Runs that outlive the "
     "wait come back as run_ids for agents_status.",
 ]
 
