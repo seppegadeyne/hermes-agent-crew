@@ -83,7 +83,8 @@ def schema(name: str, description: str = "") -> dict:
                 "plan": _PLAN,
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": _WAIT_MAX,
                                  "description": "How long to wait for results before returning run_ids "
-                                                "(default from settings, capped below Hermes' tool deadline)."},
+                                                "(default from settings, capped below Hermes' tool deadline). "
+                                                "0 only when you have other work to do meanwhile."},
             },
             "required": [],
         }}

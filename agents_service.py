@@ -1695,8 +1695,9 @@ _PROMPT_TAIL = [
     "When to use it:",
     "- Swarm early: more than a handful of reads or searches? Send read-only scouts in ONE call, one task "
     "per question or area, before you read it all yourself.",
-    "- Background: wait_seconds 0 for a builder or long review while you do your part; collect with "
-    "agents_status.",
+    "- Background: wait_seconds 0 only when you have your own work meanwhile (your part beside a "
+    "builder), then collect with agents_status; with nothing else to do, keep the default wait (one round "
+    "trip less).",
     "- Parallel builders: disjoint write_scope per writer; without one, writers run one at a time.",
     "- Reviewer: before locking a multi-file plan, when the same error fails twice, before calling "
     "non-trivial work done; pass attach_diff: true.",

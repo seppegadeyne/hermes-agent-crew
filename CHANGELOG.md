@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.3 (2026-10-18)
+
+- The lead's prompt and the `wait_seconds` description say to use `wait_seconds: 0` only when the
+  lead has its own work to do while the agents run; otherwise it keeps the default wait. Expected
+  effect: one round trip less per agent call, without a slower result. In the 24 hours of sessions
+  reviewed (2 lead sessions, 18 reviewer runs), the lead started 12 of 14 `agents_run` calls with
+  `wait_seconds: 0`. In 8 of those 12 it called `agents_status` 7-80 seconds later, after 1-5 quick
+  calls of its own, and 5 needed a second `agents_status` because each wait stops at the
+  395-second tool deadline. Each extra round trip resends the whole lead context (sessions of
+  28M-69M cache-read tokens). A long builder still comes back as run_ids at the deadline, so
+  waiting costs no extra round trip there either. About 95 characters more in the lead's prompt;
+  the fixed text stays under `FIXED_PROMPT_BUDGET`. Not yet measured in a live session.
+
 ## 0.9.2 (2026-10-17)
 
 - The fixed text of the lead's prompt section is rewritten shorter, same instructions: 2,663 -> 1,965
