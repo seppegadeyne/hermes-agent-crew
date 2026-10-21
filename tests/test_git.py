@@ -61,3 +61,20 @@ def test_invalid_ref_and_missing_repository(tmp_path):
     assert "invalid diff_base" in agents_git.collect(tmp_path, "--output=/tmp/x", 5_000)
     assert "no git repository" in agents_git.collect(tmp_path, None, 5_000)
     assert "failed" in agents_git.collect(make_repo(tmp_path), "no-such-ref", 5_000)
+
+
+def test_head_and_ancestry(tmp_path):
+    repo = make_repo(tmp_path)
+    first = agents_git.head(repo)
+    assert first and len(first) == 40
+    assert agents_git.is_ancestor(repo, first)
+    git(repo, "commit", "-qam", "second")
+    assert agents_git.head(repo) != first and agents_git.is_ancestor(repo, first)
+    git(repo, "checkout", "-q", "--orphan", "other")
+    git(repo, "commit", "-qm", "unrelated")
+    assert not agents_git.is_ancestor(repo, first)
+    assert not agents_git.is_ancestor(repo, "main; rm -rf /") and not agents_git.is_ancestor(repo, "HEAD")
+    assert agents_git.head(tmp_path / "missing") is None
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert agents_git.head(plain) is None

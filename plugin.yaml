@@ -1,5 +1,5 @@
 name: hermes-agent-crew
-version: 0.9.3
+version: 0.10.0
 description: "Named subagents for Hermes on any provider, local models included: strong models review, balanced models build, fast models swarm. The lead is the session's own model. Agents are Markdown files (the Claude Code agent format) with a fixed tier or model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone

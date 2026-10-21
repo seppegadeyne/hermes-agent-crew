@@ -149,6 +149,7 @@ class FakeHost:
         self.down = set()    # base_urls that do not answer
         self.probes = []
         self.mcp_reads = set()  # MCP tools whose server marked them readOnlyHint=True
+        self.deferred = True    # tool search hides plugin tools (agents_run) behind tool_call
         self.repo = home
         self.toolsets = {
             "read_file": "file", "search_files": "file", "write_file": "file", "patch": "file",
@@ -180,6 +181,9 @@ class FakeHost:
 
     def mcp_read_only(self, name):
         return name in self.mcp_reads
+
+    def tool_deferred(self, name):
+        return self.deferred
 
     def spawn_paused(self):
         return self.paused

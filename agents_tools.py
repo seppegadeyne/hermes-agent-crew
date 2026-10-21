@@ -33,6 +33,10 @@ _TASK = {
                                        "(for reviews; keeps the diff out of your own context)."},
         "diff_base": {"type": "string",
                       "description": "Git ref to diff against when attach_diff is true (default HEAD)."},
+        "follow_up": {"type": "string",
+                      "description": "Re-review: run_id of an earlier read-only run in the same workdir. The agent "
+                                     "gets that report plus only the changes since that run started, and checks "
+                                     "whether its findings were fixed, instead of reading everything again."},
     },
     "required": ["agent", "goal"],
 }
@@ -41,7 +45,7 @@ _TASK = {
 _STAGE = {
     "type": "object",
     "properties": {
-        **{k: v for k, v in _TASK["properties"].items()},
+        **{k: v for k, v in _TASK["properties"].items() if k != "follow_up"},
         "name": {"type": "string", "description": "Unique stage name (lowercase), used by for_each and in item ids."},
         "split": {"type": "array", "items": {"type": "string"},
                   "description": "One run per entry (a folder, file or page); the entry is added to the goal as "

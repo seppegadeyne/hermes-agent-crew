@@ -124,19 +124,28 @@ is a deprecated alias for one release.
   subagent has no other reliable notion of "the current directory".
 - `attach_diff` adds `git status`, `--stat` and the diff of the working tree in `workdir` (against
   `diff_base`, default `HEAD`) to the agent's context.
+- `follow_up` (read-only agents) is the `run_id` of an earlier read-only run in the same
+  `workdir`, for a re-review after fixes. The agent gets that run's report plus only the changes
+  since the commit that run started from (committed and uncommitted), and checks whether the earlier
+  findings were fixed instead of reading everything again. When that commit is no longer an ancestor
+  of `HEAD` (rebase, amend, other branch), the agent reviews in full and still gets the earlier
+  report. Opt-in per task; not for plan stages, and not together with `diff_base`.
 - The wait is capped 25 seconds below Hermes' tool deadline (`timeouts.tools.sequential_call`,
   default 420 seconds). Agents that are still working come back as `run_ids`.
 
 `agents_status` collects, waits for or cancels those runs. Without `run_ids` it returns every run
 whose result the lead has not seen yet.
 
-With tool search enabled, Hermes may defer both tools behind `tool_search`; the plugin's prompt
-section tells the model to call them through `tool_call` then.
+With tool search enabled, Hermes defers plugin tools behind `tool_search`. The prompt section then
+gives the exact `tool_call` shape for `agents_run`, so the lead calls it without a search or
+describe round trip; without tool search it shows the direct call.
 
 Scouting nudge: when the lead makes `nudge_after` (default 8) separate reads or searches in one
-turn without using agents, the plugin appends a one-line hint to that tool result that names the
-read-only agents. Repeated calls on the same target (paging one file, the same search or command)
-count once. It fires once per turn, never for subagents, and never after the turn used agents.
+turn without using agents, the plugin appends a hint to that tool result. It names the latest
+lookups and a ready call (an explorer for files and commands, a researcher for web lookups, with the
+folder the lookups share as `workdir`) in the shape this session can send. Repeated calls on the same
+target (paging one file, the same search or command) count once. It fires once per turn, never for
+subagents, and never after the turn used agents.
 
 Read-only agents have no shell. Goals that need commands (probes, scripts, tests) go to a writer
 with a `write_scope` or stay with the lead; the prompt section says so.

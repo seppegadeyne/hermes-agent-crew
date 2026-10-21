@@ -343,3 +343,19 @@ def test_two_stage_plan_through_the_real_lifecycle(loaded, monkeypatch):
     assert out["plan"]["items"] == [{"id": "scan-1", "title": "off by one in mean", "status": "confirmed"}]
     assert [k["model"] for k in built] == ["haiku", "sonnet"]
     assert "ONE fenced ```json block" in built[0]["context"] and "You verify the findings" in built[1]["context"]
+
+
+def test_real_tool_search_hides_agents_run_unless_switched_off(loaded, hermes_home):
+    from hermes_cli import config as hermes_config
+
+    from hermes_agent_crew.agents_host import HermesHost
+    assert HermesHost.tool_deferred("agents_run") is True
+    assert HermesHost.tool_deferred("read_file") is False  # core tools never hide
+    (hermes_home / "config.yaml").write_text(
+        "plugins:\n  enabled: [hermes-agent-crew]\ntools:\n  tool_search:\n    enabled: \"off\"\n", encoding="utf-8")
+    for name in ("_config_cache", "_readonly_cache"):
+        if hasattr(hermes_config, name):
+            getattr(hermes_config, name).clear()
+    if hasattr(hermes_config, "invalidate_config_cache"):
+        hermes_config.invalidate_config_cache()
+    assert HermesHost.tool_deferred("agents_run") is False

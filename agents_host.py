@@ -114,6 +114,22 @@ class HermesHost:
             return False
 
     @staticmethod
+    def tool_deferred(name: str) -> bool:
+        """True when tool search hides ``name`` behind its bridge (reachable only through tool_call).
+
+        Plugin tools are deferred whenever tool search is on. Unknown or moved internals mean False:
+        the lead is then shown the plain call shape, which is also what tool_call names.
+        """
+        try:
+            from tools.tool_search import is_deferrable_tool_name, load_config_readonly
+            config = load_config_readonly()
+            if str(getattr(config, "enabled", "off")).lower() == "off":
+                return False
+            return bool(is_deferrable_tool_name(name, config.effective_defer_tools))
+        except Exception:
+            return False
+
+    @staticmethod
     def spawn_paused() -> bool:
         try:
             from tools.delegate_tool_registry import is_spawn_paused

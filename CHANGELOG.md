@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.10.0 (2026-10-21)
+
+Measured over 72 hours of sessions (5 Hermes profiles): agents ran in 4 of 88 lead sessions, 9 of
+10 tasks were reviews, and the scouting nudge fired 4 times without one agents_run after it, while
+the four most expensive sessions (11-47 USD) did all their reading in the lead. One session ran 5
+full reviews of the same repository, 15-49 tool calls each.
+
+- Re-reviews: a task can set `follow_up: <run_id>` of an earlier read-only run in the same workdir.
+  The agent gets that report (clipped to 4,000 characters) and the diff since the commit the earlier
+  run started from, and checks whether its findings were fixed. A commit that is no longer an
+  ancestor of HEAD falls back to a full review. Opt-in: the lead decides, nothing is narrowed
+  silently. Every read-only task now records its folder and HEAD: one `git rev-parse` per folder per
+  call, plus one `git merge-base` when `follow_up` is set (no diff, so no filters run).
+  Expected effect: a re-review reads the change, not the whole codebase again (fewer child tool
+  calls and tokens; the lead's context is unchanged). Not yet measured in a live session.
+- The nudge is concrete: it lists the latest lookups (at most 4) and a ready call with an explorer or
+  researcher and the shared folder as workdir, in the shape this session needs (through tool_call
+  when tool search hides agents_run). Lookups that failed still count but do not shape the
+  suggestion. Expected effect: handing the rest over takes one call instead of composing one; about
+  600-1,000 characters per nudge (was about 300), at most once per turn.
+- When tool search defers agents_run (always, for plugin tools), the prompt section shows the exact
+  tool_call shape and says no search or describe is needed; the agents_run description starts with
+  the trigger, because that first sentence is what the tool_search catalog lists. In 14 days of
+  sessions 12 of 72 agents_run calls came after a search or describe. The fixed prompt text stays
+  under `FIXED_PROMPT_BUDGET` (2,098 of 2,100 characters).
+- Considered and left out: injecting agents_run into each model request and renaming the reply's
+  tool calls through LLM middleware. A pre-implementation review found it breaks replay on
+  providers that keep a native copy of the assistant turn and on OAuth-prefixed tool names.
+
 ## 0.9.3 (2026-10-18)
 
 - The lead's prompt and the `wait_seconds` description say to use `wait_seconds: 0` only when the

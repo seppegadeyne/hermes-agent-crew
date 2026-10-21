@@ -15,6 +15,7 @@ import contextvars
 import fnmatch
 import json
 import os
+import re
 import shlex
 import textwrap
 import threading
@@ -65,6 +66,9 @@ _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
 MAX_SEEN_LOOKUPS = 64            # distinct lookups remembered per turn; far above any nudge threshold
+NUDGE_SHOWN_LOOKUPS = 4          # the latest lookups the nudge names, so the lead can hand them over as they are
+FOLLOW_UP_REPORT_CHARS = 4_000   # the previous report a follow_up run gets in its context
+RUN_ID_RE = re.compile(r"^ag_[0-9a-f]{10}$")
 LAUNCH_FAILURES = frozenset({"launch_failed", "endpoint_unavailable", "model_required", "provider_unsupported"})
 PLAN_REPORT_CHARS = 8_000        # the lead reads at most this much of a plan's result
 PLAN_TRAIL_CHARS = 4_000         # per run summary kept in an item's trail
@@ -134,6 +138,8 @@ class Run:
     note: str | None = None
     fallback: str | None = None  # routes skipped because their endpoint did not answer
     plan_id: str | None = None   # set for runs a plan launched; the plan reports them, not agents_status
+    workdir: str | None = None   # resolved folder of a read-only run (follow_up must match it)
+    head_sha: str | None = None  # HEAD when a read-only run started: the base of a later follow_up diff
     stop: dict | None = None
     cancel_requested: bool = False
     reported: bool = False
@@ -271,7 +277,7 @@ class AgentsService:
             state = self._nudges.get(session_id)
             if state is None or state["turn"] != turn_id:
                 state = {"turn": turn_id, "count": 0, "done": False, "fanouts": 0, "plan_hint": False,
-                         "seen": set()}
+                         "seen": OrderedDict()}
                 self._nudges[session_id] = state
             self._nudges.move_to_end(session_id)
             while len(self._nudges) > MAX_NUDGE_SESSIONS:
@@ -287,10 +293,13 @@ class AgentsService:
                 key = _lookup_key(tool_name, args)
                 if key in state["seen"]:
                     return None
-                if len(state["seen"]) < MAX_SEEN_LOOKUPS:
-                    state["seen"].add(key)
+                failed = is_error_result(result, status)  # still counts, but must not shape the suggestion
+                state["seen"][key] = None if failed else (tool_name, args if isinstance(args, dict) else {})
+                while len(state["seen"]) > MAX_SEEN_LOOKUPS:
+                    state["seen"].popitem(last=False)
                 state["count"] += 1
             count = state["count"]
+            recent = [lookup for lookup in state["seen"].values() if lookup][-NUDGE_SHOWN_LOOKUPS * 2:]
         if delegating:
             if not plan_hint or is_error_result(result, status) or not self.config()[0]["nudge_after"]:
                 return None
@@ -306,7 +315,7 @@ class AgentsService:
             if state["done"]:  # a parallel call of the same turn got there first
                 return None
             state["done"] = True
-        return result + "\n\n" + nudge_text(count, scouts)
+        return result + "\n\n" + nudge_text(count, scouts, recent, self.host.tool_deferred("agents_run"))
 
     @staticmethod
     def _count_fanout(state: dict, tool_name: str, args: Any, result: Any) -> bool:
@@ -350,6 +359,9 @@ class AgentsService:
         if args.get("plan") is not None:
             return self._run_plan(args, parent, session_id, settings, problems, roster, started)
         tasks = self._parse_tasks(args, settings, roster)
+        heads: dict = {}  # one rev-parse per folder per call
+        for spec, task in tasks:  # git runs here, outside the admit lock, like the endpoint probes
+            self._prepare_readonly(spec, task, session_id, parent, heads)
         features = self.features()
         parent_provider = str(getattr(parent, "provider", "") or "")
         # Probes run here, outside the admit lock; their time counts against this call's wait budget.
@@ -369,6 +381,43 @@ class AgentsService:
                     for spec, task in tasks]
         early = self._wait(runs, started + self._wait_budget(args.get("wait_seconds"), settings))
         return self._report(runs, settings, problems, roster, early)
+
+    def _prepare_readonly(self, spec: AgentSpec, task: dict, session_id: str, parent: Any,
+                          heads: dict | None = None) -> None:
+        """Note where a read-only run starts (folder and HEAD) and resolve its follow_up, if any."""
+        if not spec.readonly:
+            return
+        where = Path(task.get("workdir") or self.host.cwd())
+        try:
+            task["resolved_workdir"] = str(where.resolve())
+        except OSError:
+            task["resolved_workdir"] = str(where)
+        heads = {} if heads is None else heads
+        if task["resolved_workdir"] not in heads:
+            heads[task["resolved_workdir"]] = agents_git.head(where)
+        task["head"] = heads[task["resolved_workdir"]]
+        if task.get("follow_up"):
+            task["previous"] = self._previous(task["follow_up"], task, session_id, parent)
+
+    def _previous(self, run_id: str, task: dict, session_id: str, parent: Any) -> dict:
+        """The earlier run a follow_up builds on: its report, and the commit to diff from (None = review in full)."""
+        with self._lock:
+            prev = self._runs.get(run_id)
+        if prev is None or not self._owns(prev, session_id, parent):
+            raise Refusal("unknown_follow_up", f"follow_up {run_id} is not a known agent run of this conversation "
+                                               "(runs live in memory: a restart or many newer runs drop them). Run "
+                                               "a full review instead.")
+        self._poll(prev)  # a run nobody waited on (wait_seconds 0) may have finished meanwhile
+        if prev.status != "succeeded" or not prev.summary or not prev.readonly or prev.plan_id:
+            raise Refusal("invalid_follow_up", f"follow_up {run_id}: only a finished read-only run outside a plan, "
+                                               "with a report, can be followed up.")
+        if prev.workdir != task["resolved_workdir"]:
+            raise Refusal("invalid_follow_up", f"follow_up {run_id} ran in {prev.workdir or 'an unknown folder'}, "
+                                               f"this task in {task['resolved_workdir']}; use the same workdir.")
+        base = prev.head_sha
+        if base and not agents_git.is_ancestor(Path(task["resolved_workdir"]), base):
+            base = None  # rebased, amended or another branch: the old commit says nothing about this tree
+        return {"run_id": prev.run_id, "summary": prev.summary, "base": base}
 
     def _live_runs(self, session_id: str, parent: Any) -> list:
         """This conversation's runs that are really still running: each one is polled first, so a run that
@@ -478,11 +527,11 @@ class AgentsService:
             except ValueError:
                 raise Refusal("invalid_arguments", "tasks must be a list of task objects.") from None
         if raw is None and args.get("agent"):
-            keys = ("agent", "goal", "context", "attach_diff", "diff_base", "workdir", "write_scope")
+            keys = ("agent", "goal", "context", "attach_diff", "diff_base", "workdir", "write_scope", "follow_up")
             raw = [{key: args.get(key) for key in keys}]
         if not isinstance(raw, list) or not raw:
             raise Refusal("invalid_arguments",
-                          "Pass tasks: [{agent, goal, context?, workdir?, write_scope?, attach_diff?}].")
+                          "Pass tasks: [{agent, goal, context?, workdir?, write_scope?, attach_diff?, follow_up?}].")
         if len(raw) > settings["max_parallel"]:
             raise Refusal("too_many_tasks", f"At most {settings['max_parallel']} tasks per call; nothing was started. "
                                             "Send the rest in a second agents_run call, or merge related tasks.")
@@ -510,6 +559,18 @@ class AgentsService:
         if base not in (None, "") and not agents_git.valid_ref(base):
             raise Refusal("invalid_diff_base", f"{where}: diff_base {base!r} is not a git ref.")
         attach = item.get("attach_diff")
+        follow_up = item.get("follow_up")
+        if follow_up in (None, ""):
+            follow_up = None
+        elif not isinstance(follow_up, str) or not RUN_ID_RE.match(follow_up.strip()):
+            raise Refusal("invalid_follow_up", f"{where}: follow_up must be the run_id of an earlier agent run "
+                                               "(ag_ plus 10 hex characters).")
+        elif not spec.readonly:
+            raise Refusal("invalid_follow_up", f"{where}: follow_up is for read-only agents (re-reviews); "
+                                               f"'{spec.name}' can change files.")
+        elif base not in (None, ""):
+            raise Refusal("invalid_follow_up", f"{where}: follow_up brings its own diff (since the earlier run); "
+                                               "leave diff_base out.")
         workdir = self._workdir(item.get("workdir"), where)
         write_scope = self._write_scope(item.get("write_scope"), workdir or self.host.cwd(), spec, where)
         return spec, {
@@ -519,6 +580,7 @@ class AgentsService:
             "diff_base": base.strip() if isinstance(base, str) and base.strip() else None,
             "workdir": workdir,
             "write_scope": write_scope,
+            "follow_up": follow_up.strip() if follow_up else None,
         }
 
     @staticmethod
@@ -601,7 +663,8 @@ class AgentsService:
                 settings: dict, features: dict) -> Run:
         run = Run(run_id="ag_" + uuid.uuid4().hex[:10], agent=spec.name, owner_session_id=session_id,
                   goal=task["goal"], readonly=spec.readonly, write_scope=task.get("write_scope", ()),
-                  owner_ref=_weak(parent), model=spec.model, started_at=self.wall())
+                  owner_ref=_weak(parent), model=spec.model, started_at=self.wall(),
+                  workdir=task.get("resolved_workdir"), head_sha=task.get("head"))
         self._track(run)
         if spec.unreachable:
             return self._fail(run, "endpoint_unavailable",
@@ -692,18 +755,38 @@ class AgentsService:
             rules.append("- Only your configured tools work; other tool calls are blocked.")
         rules.append("- Finish with ONE compact report for the lead: findings first (with file:line where it "
                      "applies), then what you checked, then open questions. No transcripts, no full file dumps.")
+        previous = task.get("previous")
+        if previous:
+            if previous["base"]:
+                rules.append("- This is a follow-up of an earlier run (its report is below). Review what changed since "
+                             "then (the diff below, against the commit that run started from; it also holds "
+                             "uncommitted changes, including any the earlier run already saw), and check whether "
+                             "each earlier finding was fixed. Read other code only where a change reaches it. Do not "
+                             "repeat findings that still hold unchanged: list each as still open with its title, "
+                             "file:line and one line of why, so a later follow-up still has them.")
+            else:
+                rules.append("- This is a follow-up of an earlier run (its report is below), but its commit is not an "
+                             "ancestor of HEAD (rebase, amend or branch switch) or not a git repository: review in "
+                             "full, and say for each earlier finding whether it still holds.")
         rules.extend(task.get("rules") or ())  # plan stages: the items/verdict block comes last
         parts = [head, "\n".join(rules)]
+        if previous:
+            parts.append(f"## Earlier report (run {previous['run_id']})\n"
+                         + clip(previous["summary"], FOLLOW_UP_REPORT_CHARS))
         remaining = CONTEXT_BUDGET - sum(len(p) + 2 for p in parts)
         caller = clip(task["context"], MAX_CALLER_CONTEXT_CHARS) if task["context"] else ""
         diff = ""
-        if task["attach_diff"]:
+        follow_base = previous["base"] if previous else None
+        if task["attach_diff"] or follow_base:
             reserve = min(len(caller), 8_000) + 64 if caller else 0
             budget = min(settings["diff_max_chars"], remaining - reserve - 80)
             where = task.get("workdir") or self.host.cwd()
-            body = (agents_git.collect(where, task["diff_base"], budget) if budget >= MIN_DIFF_CHARS
+            base = follow_base or task["diff_base"]
+            body = (agents_git.collect(where, base, budget) if budget >= MIN_DIFF_CHARS
                     else "(no room left for a diff; read the changed files with read_file)")
-            diff = "## Working tree snapshot (read-only, taken when the agent started)\n" + body
+            title = ("## Changes since the earlier run (read-only, taken when the agent started)" if follow_base
+                     else "## Working tree snapshot (read-only, taken when the agent started)")
+            diff = title + "\n" + body
             remaining -= len(diff) + 2
         if caller:
             parts.append("## Context from the lead\n" + clip(caller, max(0, remaining - 30)))
@@ -1491,7 +1574,7 @@ class AgentsService:
             return ""
         if not settings.get("prompt_section") or not roster.agents:
             return ""
-        return render_prompt(roster)
+        return render_prompt(roster, deferred=self.host.tool_deferred("agents_run"))
 
 
 def _lookup_key(tool_name: str, args: Any) -> str:
@@ -1640,11 +1723,81 @@ def _report_count(result: Any) -> int:
     return sum(1 for r in results if isinstance(r, dict) and r.get("summary")) if isinstance(results, list) else 0
 
 
-def nudge_text(count: int, scouts: list) -> str:
-    names = ", ".join(scouts[:4])
-    return (f"[hermes-agent-crew] {count} separate reads/searches by hand in this turn. If more lookups follow, "
-            f"send them to read-only agents ({names}) in ONE agents_run call, one task per question or area, "
-            "and keep your own context for decisions. Keep going yourself if you are nearly done.")
+WEB_LOOKUPS = frozenset({"web_search", "web_extract"})
+
+
+def _lookup_label(tool_name: str, args: dict) -> str:
+    """One short line naming what a lookup looked at, for the nudge."""
+    if tool_name == "read_file":
+        text = f"read {args.get('path')}"
+    elif tool_name == "search_files":
+        text = f"search {args.get('pattern')!r} in {args.get('path') or '.'}"
+    elif tool_name == "web_search":
+        text = f"web search {args.get('query')!r}"
+    elif tool_name == "web_extract":
+        urls = args.get("urls")
+        text = "fetch " + (", ".join(map(str, urls[:2])) if isinstance(urls, list) else str(urls))
+    else:
+        text = " ".join(str(args.get("command") or "").split())
+    return _shorten(text, 110)
+
+
+def _lookup_paths(tool_name: str, args: dict) -> list:
+    """Absolute local paths a lookup touched (a terminal command counts its leading cd)."""
+    if tool_name in ("read_file", "search_files"):
+        raw = [args.get("path")]
+    elif tool_name == "terminal":
+        command = str(args.get("command") or "").strip()
+        raw = [command[3:].split("&&")[0].split(";")[0].strip()] if command.startswith("cd ") else []
+    else:
+        raw = []
+    return [os.path.expanduser(p) for p in raw if isinstance(p, str) and os.path.expanduser(p).startswith("/")]
+
+
+def nudge_workdir(lookups: list) -> str | None:
+    """The folder most of the turn's local lookups share; None when it is / or the home folder."""
+    paths = [path for name, args in lookups for path in _lookup_paths(name, args)]
+    if not paths:
+        return None
+    try:
+        common = os.path.commonpath(paths)
+    except ValueError:
+        return None
+    if common in paths and any(name == "read_file" for name, _ in lookups):
+        files = {os.path.expanduser(str(args.get("path"))) for name, args in lookups if name == "read_file"}
+        if common in files:  # one file read again and again: its folder is the workdir
+            common = os.path.dirname(common)
+    if common in ("/", os.path.expanduser("~")) or common.count("/") < 2:
+        return None
+    return common
+
+
+def nudge_text(count: int, scouts: list, lookups: list | None = None, deferred: bool = False) -> str:
+    """The scouting hint: what the lead just looked at, and a call it can send as it is."""
+    lookups = lookups or []
+    web = sum(1 for name, _ in lookups if name in WEB_LOOKUPS)
+    preferred = "researcher" if lookups and web * 2 > len(lookups) else "explorer"
+    agent = preferred if preferred in scouts else scouts[0]
+    task: dict = {"agent": agent, "goal": "<the open question(s), and what to report back>",
+                  "context": "<what you already know and ruled out>"}
+    workdir = nudge_workdir(lookups)
+    if workdir:
+        task["workdir"] = workdir
+    arguments = {"tasks": [task]}
+    if deferred:
+        wrapped = {"calls": [{"name": "agents_run", "arguments": arguments}]}
+        call = "tool_call " + json.dumps(wrapped, ensure_ascii=False)
+    else:
+        call = "agents_run " + json.dumps(arguments, ensure_ascii=False)
+    shown = [f"  - {_lookup_label(name, args)}" for name, args in lookups[-NUDGE_SHOWN_LOOKUPS:]]
+    return "\n".join([
+        f"[hermes-agent-crew] {count} separate reads/searches by hand in this turn"
+        + (", latest:" if shown else "."), *shown,
+        "Still more to look up? Hand it to read-only agents ("
+        + ", ".join(scouts[:4]) + ") in ONE call, one task per question or area (several tasks run in parallel), "
+        "and keep your context for decisions:",
+        "  " + call,
+        "Keep going yourself if you are nearly done."])
 
 
 def model_label(spec: AgentSpec) -> str:
@@ -1688,42 +1841,49 @@ _PROMPT_HEAD = [
     "compact reports, so your context stays small.",
     "Roster:",
 ]
+_CALL_DIRECT = ('Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", "workdir": '
+                '"/abs/path"}]}.')
+# Tool search hides plugin tools behind its bridge; the exact shape saves the lead a search + describe round trip.
+_CALL_DEFERRED = ('Call agents_run through tool_call, no search or describe needed: {"calls": [{"name": '
+                  '"agents_run", "arguments": {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", '
+                  '"workdir": "/abs/path"}]}}]}.')
 _PROMPT_TAIL = [
-    'Call agents_run with {"tasks": [{"agent": "<name>", "goal": "...", "context": "...", "workdir": '
-    '"/abs/path"}]} (if deferred: tool_call, name "agents_run"). Tasks in one call run in parallel. Set workdir '
-    "to the folder the work is in (default: this session's).",
+    _CALL_DEFERRED + " Tasks in one call run in parallel. Set workdir to the folder the work is in (default: this "
+    "session's).",
     "When to use it:",
     "- Swarm early: more than a handful of reads or searches? Send read-only scouts in ONE call, one task "
     "per question or area, before you read it all yourself.",
-    "- Background: wait_seconds 0 only when you have your own work meanwhile (your part beside a "
-    "builder), then collect with agents_status; with nothing else to do, keep the default wait (one round "
-    "trip less).",
+    "- Background: wait_seconds 0 only when you have your own work meanwhile, then collect with "
+    "agents_status; otherwise keep the default wait (one round trip less).",
     "- Parallel builders: disjoint write_scope per writer; without one, writers run one at a time.",
     "- Reviewer: before locking a multi-file plan, when the same error fails twice, before calling "
-    "non-trivial work done; pass attach_diff: true.",
+    "non-trivial work done; pass attach_diff: true. Re-review after fixes: follow_up: <its run_id>.",
     "- Mechanical fan-out: whole-file checks and extractions (language or lint MCP, pages) go one worker per "
     "file or URL, in parallel, over the COMPLETE input. Never check sampled excerpts inline to save calls; "
     "under ~1,000 characters you may check inline.",
     "- Plans for big jobs: 5+ independent items (files, findings, pages) through the same steps? Pass a plan "
     "(scan, verify, fix, check) instead of chaining calls; you read only the final result.",
     "- Skip agents for small lookups: every agent starts with a fresh context.",
-    "- Read-only agents have no shell (no scripts, curl, probes, tests) and cannot save notes, but can call "
-    "the profile's read-only MCP tools: "
-    "send big MCP reads to them; work that must execute goes to a writer or stays with you.",
+    "- Read-only agents have no shell (no scripts, curl, tests) and cannot save notes, but can call the "
+    "profile's read-only MCP tools: send big MCP reads to them; work that must execute stays with you or a writer.",
     "Agents cannot see this conversation: give a complete goal and context (paths, constraints, what you "
     "know, relevant note or knowledge-base paths so they read instead of search). Their reports are evidence "
     "to check. Runs that outlive the wait come back as run_ids for agents_status.",
 ]
 
 
-def render_prompt(roster: Roster, limit: int = 3_800) -> str:
+def render_prompt(roster: Roster, limit: int = 3_800, deferred: bool = True) -> str:
     """Head and usage guide always survive; the roster gets the space that is left.
 
     Over budget, descriptions shrink first (triggers stay whole), then agents move to a "… N more" line.
+    ``deferred`` picks the call shape: through tool_call when tool search hides agents_run, else direct.
     """
+    tail = list(_PROMPT_TAIL)
+    if not deferred:
+        tail[0] = tail[0].replace(_CALL_DEFERRED, _CALL_DIRECT)
     agents = sorted(roster.agents.values(), key=lambda s: s.name)[:12]
     hidden = len(roster.agents) - len(agents)
-    fixed = len("\n".join(_PROMPT_HEAD + _PROMPT_TAIL)) + 1
+    fixed = len("\n".join(_PROMPT_HEAD + tail)) + 1
     budget = limit - fixed
 
     def roster_block(shown: list[AgentSpec], description_chars: int, more: int) -> list[str]:
@@ -1741,14 +1901,16 @@ def render_prompt(roster: Roster, limit: int = 3_800) -> str:
         else:
             continue
         break
-    return clip("\n".join(_PROMPT_HEAD + block + _PROMPT_TAIL), limit)
+    return clip("\n".join(_PROMPT_HEAD + block + tail), limit)
 
 
 def tool_description(roster: Roster) -> str:
     agents = sorted(roster.agents.values(), key=lambda s: s.name)
     names = ", ".join(agent_label(spec) for spec in agents[:10]) or "none configured yet"
-    return ("Run named subagents from the operator's roster (each has a fixed model and tool set; read-only "
-            "agents cannot change anything or run commands) on self-contained tasks, in parallel, and get their "
-            "compact final reports. Agents cannot see this conversation: give each task a full goal and context. "
+    # The first sentence is what tool search lists in its catalog (about 60 characters): make it the trigger.
+    return ("Delegate lookups, reviews and builds to subagents. Runs named subagents from the operator's roster "
+            "(each has a fixed model and tool set; read-only agents cannot change anything or run commands) on "
+            "self-contained tasks, in parallel, and returns their compact final reports instead of the reading "
+            "itself. Agents cannot see this conversation: give each task a full goal and context. "
             "Results that take longer than wait_seconds come back as run_ids for agents_status. Agents at startup: "
             f"{names}.")

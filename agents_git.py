@@ -36,8 +36,40 @@ def _head(text: str, limit: int, note: str) -> str:
 
 def _env() -> dict:
     env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", PAGER="cat", LC_ALL="C")
+    # GIT_NO_LAZY_FETCH: in a partial clone a missing object must not trigger a fetch (and a credential helper).
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat", PAGER="cat", LC_ALL="C",
+               GIT_NO_LAZY_FETCH="1")
     return env
+
+
+SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
+
+
+def _plain(args: list, cwd: Path) -> tuple:
+    """Run one git command that reads only refs and objects (no diff, so no filters); (code, stdout)."""
+    git = shutil.which("git")
+    if not git:
+        return 127, ""
+    try:
+        proc = subprocess.run([git, *_BASE_CONFIG, *args], cwd=str(cwd), env=_env(), stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=TIMEOUT_SECONDS, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return 1, ""
+    return proc.returncode, proc.stdout.decode("utf-8", "replace").strip()
+
+
+def head(cwd: Path) -> str | None:
+    """Full sha of HEAD in the repository at ``cwd``, or None (no repository, no commit, git missing)."""
+    code, out = _plain(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], cwd)
+    return out if code == 0 and SHA_RE.match(out) else None
+
+
+def is_ancestor(cwd: Path, sha: str) -> bool:
+    """True when ``sha`` is HEAD or an ancestor of it (False after a rebase, amend or branch switch)."""
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
+        return False
+    code, _ = _plain(["merge-base", "--is-ancestor", sha, "HEAD"], cwd)
+    return code == 0
 
 
 def collect(cwd: Path, base: str | None, max_chars: int) -> str:
