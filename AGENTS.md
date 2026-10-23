@@ -8,7 +8,8 @@ The plugin exists for two goals, and every change has to serve them:
 
 - A change must improve at least one goal and must not make the other worse. Name the expected
   effect in the `CHANGELOG.md` entry, and where practical check it with a live run (lead tokens,
-  wall-clock time, child `api_calls`) before you call it done.
+  wall-clock time, child `api_calls`) before you call it done. `docs/measuring.md` lists the
+  measurement scripts (for the scouting nudge: `scripts/nudge_report.py`) and how to act on them.
 - Build on what exists: extend the current tools, guard and service. Do not rewrite. A new
   feature reuses the existing launch, policy and writer checks rather than adding a parallel path.
 - Opt-in, never automatic: the lead decides when to delegate. Small tasks stay with the lead,

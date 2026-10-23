@@ -2,8 +2,8 @@
 
 ## 0.12.0 (2026-10-23)
 
-Measured over 7 days of lead sessions (611 turns, 38 nudges shown): no nudge was followed by an
-explorer or researcher run, 24 of 38 came after the lead had already edited, and after the median
+Measured over 7 days of lead sessions (611 turns, 38 nudges shown): 1 of 38 nudges was followed by
+an explorer run, 24 of 38 came after the lead had already edited, and after the median
 nudge the lead read only 2 more targets (about 2,300 characters). Each nudge was about 1,000
 characters that stayed in the lead's context for the rest of the session. A replay of the same
 turns with other thresholds (cost = hint characters x later API calls, benefit = reading a scout
@@ -16,7 +16,9 @@ could have taken over x later calls) put the current rule at an 11.4% break-even
   lookups, which the lead had just made, and keeps the count, the characters read and a ready call.
 - Expected effect: about 83% fewer characters spent on nudges in the lead's context. The rule pays
   off when the lead follows about 1 in 40 nudges (was 1 in 9). Not yet measured in a live
-  session. If the follow rate stays at zero, the next step is `nudge_after: 0` by default.
+  session. If the follow rate stays near zero, the next step is `nudge_after: 0` by default.
+- `scripts/nudge_report.py` (documented in `docs/measuring.md`) reproduces these numbers from the
+  profiles' session databases, read-only, so the effect can be checked after two weeks.
 
 ## 0.11.0 (2026-10-23)
 
