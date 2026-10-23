@@ -87,19 +87,26 @@ def schema(name: str, description: str = "") -> dict:
                 "plan": _PLAN,
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": _WAIT_MAX,
                                  "description": "How long to wait for results before returning run_ids "
-                                                "(default from settings, capped below Hermes' tool deadline). "
-                                                "0 only when you have other work to do meanwhile."},
+                                                "(default from settings). Hermes' tool deadline caps it; the "
+                                                "result says so when it did. 0 only when you have other work to "
+                                                "do meanwhile."},
             },
             "required": [],
         }}
     return {"name": name, "description": (
         "Check, wait for or cancel agent runs started by agents_run in this conversation. Without run_ids it "
         "returns every run whose result you have not seen yet. With plan_id it continues and reports a plan "
-        "(a plan only moves on while you wait), or with item gives one item's full trail."), "parameters": {
+        "(a plan only moves on while you wait), or with item gives one item's full trail. After a crash or "
+        "restart, recent lists this profile's latest runs (folder, branch, status) from the run ledger."),
+        "parameters": {
         "type": "object",
         "properties": {
             "run_ids": {"type": "array", "items": {"type": "string"},
-                        "description": "Runs to check; omit for all unreported runs."},
+                        "description": "Runs to check; omit for all unreported runs. Runs of earlier or crashed "
+                                       "sessions come from the run ledger, with their last report."},
+            "recent": {"type": "integer", "minimum": 1, "maximum": 20,
+                       "description": "List this many of the profile's latest runs from the run ledger, also "
+                                      "from earlier or crashed sessions (no reports; pass run_ids for one)."},
             "wait_seconds": {"type": "integer", "minimum": 0, "maximum": _WAIT_MAX,
                              "description": "Wait up to this long for unfinished runs (default 0)."},
             "plan_id": {"type": "string",

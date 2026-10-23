@@ -105,12 +105,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "summary_max_chars": 12_000,
     "prompt_section": True,
     "nudge_after": 8,
+    "nudge_min_chars": 40_000,
     "plan_max_items": 24,
     "readonly_mcp": True,
     "readonly_mcp_tools": [],
+    "run_ledger": True,
 }
 INT_RANGES = {
     "nudge_after": (0, 50),
+    "nudge_min_chars": (0, 1_000_000),
     "plan_max_items": (1, 64),
     "max_parallel": (1, 16),
     "max_live_runs": (1, 32),

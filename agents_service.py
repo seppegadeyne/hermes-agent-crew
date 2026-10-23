@@ -30,6 +30,7 @@ from typing import Any
 
 from . import agents_git, agents_plan
 from .agents_config import INT_RANGES, AgentSpec, Roster, RosterCache, read_settings
+from .agents_ledger import RunLedger
 from .agents_plan import PlanError
 from .agents_policy import ChildPolicy, PolicyRegistry, scope_path, scopes_overlap
 
@@ -66,13 +67,16 @@ _HARMLESS_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 MAX_ERROR_PARSE_CHARS = 100_000
 MAX_NUDGE_SESSIONS = 512
 MAX_SEEN_LOOKUPS = 64            # distinct lookups remembered per turn; far above any nudge threshold
-NUDGE_SHOWN_LOOKUPS = 4          # the latest lookups the nudge names, so the lead can hand them over as they are
+NUDGE_RECENT_LOOKUPS = 8         # the latest lookups that pick the nudge's scout and workdir
 FOLLOW_UP_REPORT_CHARS = 4_000   # the previous report a follow_up run gets in its context
 RUN_ID_RE = re.compile(r"^ag_[0-9a-f]{10}$")
 LAUNCH_FAILURES = frozenset({"launch_failed", "endpoint_unavailable", "model_required", "provider_unsupported"})
 PLAN_REPORT_CHARS = 8_000        # the lead reads at most this much of a plan's result
 PLAN_TRAIL_CHARS = 4_000         # per run summary kept in an item's trail
 MAX_TRACKED_PLANS = 32
+MAX_RECENT = 20                  # agents_status recent: at most this many ledger lines
+LEDGER_FLAG_SECONDS = 30.0       # how long the run_ledger setting is trusted before it is read again
+_UNSET = object()
 PROBE_TTL_UP_SECONDS = 60.0     # an endpoint that answered is trusted this long
 PROBE_TTL_DOWN_SECONDS = 15.0   # one that did not is retried sooner (a local server may be starting)
 ISOLATION_MESSAGE = ("hermes-agent-crew needs plugins.isolation: in_process. Inside the plugin host process "
@@ -138,8 +142,10 @@ class Run:
     note: str | None = None
     fallback: str | None = None  # routes skipped because their endpoint did not answer
     plan_id: str | None = None   # set for runs a plan launched; the plan reports them, not agents_status
-    workdir: str | None = None   # resolved folder of a read-only run (follow_up must match it)
+    workdir: str | None = None   # resolved folder the run works in (a follow_up must match it)
     head_sha: str | None = None  # HEAD when a read-only run started: the base of a later follow_up diff
+    branch: str | None = None    # branch checked out in workdir at launch (the ledger's pointer to the work)
+    finished_at: float | None = None
     stop: dict | None = None
     cancel_requested: bool = False
     reported: bool = False
@@ -196,6 +202,20 @@ class AgentsService:
         self._nudges: OrderedDict[str, dict] = OrderedDict()  # lead session id -> this turn's scouting count
         self._probes: dict[str, tuple[bool, float]] = {}  # endpoint base_url -> (up, checked at)
         self._plans: OrderedDict[str, Plan] = OrderedDict()
+        data_dir = getattr(host, "data_dir", None)
+        self.ledger = RunLedger(data_dir if callable(data_dir) else (lambda: None), wall=wall,
+                                enabled=self._ledger_enabled)
+        self._ledger_flag: tuple[bool, float] | None = None  # (run_ledger setting, read at clock time)
+
+    def _ledger_enabled(self) -> bool:
+        """The run_ledger setting, re-read at most every LEDGER_FLAG_SECONDS (it is asked on every write)."""
+        now = self.clock()
+        flag = self._ledger_flag
+        if flag is None or now - flag[1] >= LEDGER_FLAG_SECONDS:
+            settings, _ = read_settings(self.host.get_config)
+            flag = (bool(settings.get("run_ledger", True)), now)
+            self._ledger_flag = flag
+        return flag[0]
 
     # ------------------------------------------------------------------ configuration
 
@@ -228,6 +248,13 @@ class AgentsService:
                 run.stop = {"status": str(child_status or ""),
                             "summary": child_summary if isinstance(child_summary, str) else None,
                             "duration_ms": duration_ms if isinstance(duration_ms, (int, float)) else None}
+        if run is not None and run.status == "running":
+            # A run nobody collects (wait_seconds 0) would otherwise stay "running" in the ledger and turn
+            # "lost" after a crash although it finished. The poll that collects it overwrites this snapshot
+            # with the lifecycle's own result. The ledger swallows its errors and never blocks for long.
+            stop = run.stop or {}
+            self.ledger.record(replace(run, status=STOP_STATUS.get(stop.get("status", ""), "failed"),
+                                       summary=stop.get("summary") or run.summary, finished_at=self.wall()))
         return None
 
     def pre_tool_call(self, tool_name: Any = "", task_id: Any = "", args: Any = None, **_: Any) -> dict | None:
@@ -276,7 +303,7 @@ class AgentsService:
         with self._lock:
             state = self._nudges.get(session_id)
             if state is None or state["turn"] != turn_id:
-                state = {"turn": turn_id, "count": 0, "done": False, "fanouts": 0, "plan_hint": False,
+                state = {"turn": turn_id, "count": 0, "chars": 0, "done": False, "fanouts": 0, "plan_hint": False,
                          "seen": OrderedDict()}
                 self._nudges[session_id] = state
             self._nudges.move_to_end(session_id)
@@ -298,15 +325,19 @@ class AgentsService:
                 while len(state["seen"]) > MAX_SEEN_LOOKUPS:
                     state["seen"].popitem(last=False)
                 state["count"] += 1
-            count = state["count"]
-            recent = [lookup for lookup in state["seen"].values() if lookup][-NUDGE_SHOWN_LOOKUPS * 2:]
+                state["chars"] += len(result)  # what this lookup added to the lead's context
+            count, chars = state["count"], state["chars"]
+            recent = [lookup for lookup in state["seen"].values() if lookup][-NUDGE_RECENT_LOOKUPS:]
         if delegating:
             if not plan_hint or is_error_result(result, status) or not self.config()[0]["nudge_after"]:
                 return None
             return result + "\n\n" + PLAN_HINT
         settings, _, roster = self.config()
         threshold = settings["nudge_after"]
-        if not threshold or count < threshold or is_error_result(result, status):
+        # Both: many separate lookups AND a lot of text. Many small reads cost the lead little; the hint itself
+        # stays in the context for the rest of the session, so it only pays off where the reading was heavy.
+        if (not threshold or count < threshold or chars < settings["nudge_min_chars"]
+                or is_error_result(result, status)):
             return None
         scouts = sorted(spec.name for spec in roster.agents.values() if spec.readonly)
         if not scouts:
@@ -315,7 +346,7 @@ class AgentsService:
             if state["done"]:  # a parallel call of the same turn got there first
                 return None
             state["done"] = True
-        return result + "\n\n" + nudge_text(count, scouts, recent, self.host.tool_deferred("agents_run"))
+        return result + "\n\n" + nudge_text(count, scouts, recent, self.host.tool_deferred("agents_run"), chars)
 
     @staticmethod
     def _count_fanout(state: dict, tool_name: str, args: Any, result: Any) -> bool:
@@ -362,6 +393,7 @@ class AgentsService:
         heads: dict = {}  # one rev-parse per folder per call
         for spec, task in tasks:  # git runs here, outside the admit lock, like the endpoint probes
             self._prepare_readonly(spec, task, session_id, parent, heads)
+            self._note_branch(task, heads)
         features = self.features()
         parent_provider = str(getattr(parent, "provider", "") or "")
         # Probes run here, outside the admit lock; their time counts against this call's wait budget.
@@ -380,7 +412,7 @@ class AgentsService:
             runs = [self._launch(spec, task, parent, parent_provider, session_id, settings, features)
                     for spec, task in tasks]
         early = self._wait(runs, started + self._wait_budget(args.get("wait_seconds"), settings))
-        return self._report(runs, settings, problems, roster, early)
+        return self._report(runs, settings, problems, roster, early, requested=args.get("wait_seconds"))
 
     def _prepare_readonly(self, spec: AgentSpec, task: dict, session_id: str, parent: Any,
                           heads: dict | None = None) -> None:
@@ -399,15 +431,37 @@ class AgentsService:
         if task.get("follow_up"):
             task["previous"] = self._previous(task["follow_up"], task, session_id, parent)
 
+    def _note_branch(self, task: dict, cache: dict) -> None:
+        """Record the folder and checked-out branch a run works in, for the ledger: after a crash they say
+        where its work is. One ``git symbolic-ref`` per folder per call; never raises."""
+        try:
+            where = task.get("resolved_workdir") or str(Path(task.get("workdir") or self.host.cwd()).resolve())
+        except Exception:
+            return
+        task["resolved_workdir"] = where
+        key = ("branch", where)
+        if key not in cache:
+            try:
+                cache[key] = agents_git.branch(Path(where))
+            except Exception:
+                cache[key] = None
+        task["branch"] = cache[key]
+
     def _previous(self, run_id: str, task: dict, session_id: str, parent: Any) -> dict:
         """The earlier run a follow_up builds on: its report, and the commit to diff from (None = review in full)."""
         with self._lock:
             prev = self._runs.get(run_id)
-        if prev is None or not self._owns(prev, session_id, parent):
+        if prev is not None and not self._owns(prev, session_id, parent):
+            prev = None
+        elif prev is not None:
+            self._poll(prev)  # a run nobody waited on (wait_seconds 0) may have finished meanwhile
+        else:
+            # Not in memory (restart, crash, another session of this profile): the ledger kept its report.
+            # Never polled: it has no handle here, and polling would overwrite its ledger line.
+            prev = self._from_ledger(run_id)
+        if prev is None:
             raise Refusal("unknown_follow_up", f"follow_up {run_id} is not a known agent run of this conversation "
-                                               "(runs live in memory: a restart or many newer runs drop them). Run "
-                                               "a full review instead.")
-        self._poll(prev)  # a run nobody waited on (wait_seconds 0) may have finished meanwhile
+                                               "or of this profile's run ledger. Run a full review instead.")
         if prev.status != "succeeded" or not prev.summary or not prev.readonly or prev.plan_id:
             raise Refusal("invalid_follow_up", f"follow_up {run_id}: only a finished read-only run outside a plan, "
                                                "with a report, can be followed up.")
@@ -418,6 +472,18 @@ class AgentsService:
         if base and not agents_git.is_ancestor(Path(task["resolved_workdir"]), base):
             base = None  # rebased, amended or another branch: the old commit says nothing about this tree
         return {"run_id": prev.run_id, "summary": prev.summary, "base": base}
+
+    def _from_ledger(self, run_id: str) -> Run | None:
+        """A finished run of this profile rebuilt from the ledger, for follow_up (never tracked or polled)."""
+        if not isinstance(run_id, str) or not RUN_ID_RE.match(run_id):
+            return None
+        item = self.ledger.get(run_id)
+        if not item:
+            return None
+        return Run(run_id=run_id, agent=str(item.get("agent") or ""), owner_session_id=str(item.get("owner_session_id")
+                   or ""), goal=str(item.get("goal") or ""), readonly=bool(item.get("readonly")),
+                   status=str(item.get("status") or "unknown"), summary=item.get("summary"),
+                   plan_id=item.get("plan_id"), workdir=item.get("workdir"), head_sha=item.get("head_sha"))
 
     def _live_runs(self, session_id: str, parent: Any) -> list:
         """This conversation's runs that are really still running: each one is polled first, so a run that
@@ -470,7 +536,12 @@ class AgentsService:
         ids = args.get("run_ids")
         if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, str) for i in ids)):
             raise Refusal("invalid_arguments", "run_ids must be a list of run_id strings.")
+        recent = args.get("recent")
+        if recent is not None and not (isinstance(recent, int) and not isinstance(recent, bool)
+                                       and 1 <= recent <= MAX_RECENT):
+            raise Refusal("invalid_arguments", f"recent must be a whole number from 1 to {MAX_RECENT}.")
         unknown: list[str] = []
+        foreign: set = set()  # live in this process but another conversation's: never looked up in the ledger
         with self._lock:
             if ids:
                 runs = []
@@ -478,6 +549,8 @@ class AgentsService:
                     run = self._runs.get(run_id)
                     if run is None or not self._owns(run, session_id, parent):
                         unknown.append(run_id)
+                        if run is not None:
+                            foreign.add(run_id)
                     else:
                         runs.append(run)
             else:
@@ -489,11 +562,28 @@ class AgentsService:
             reason = clip(args.get("reason") or "cancelled by the lead agent", 500)
             for run in runs:
                 self._cancel(run, reason)
-        early = self._wait(runs, started + self._wait_budget(args.get("wait_seconds", 0), settings))
-        out = self._report(runs, settings, problems, roster, early)
+        if recent and not ids:
+            runs = []  # a ledger listing only: never wait on or report this conversation's runs with it
+        requested = args.get("wait_seconds", 0)
+        early = self._wait(runs, started + self._wait_budget(requested, settings))
+        out = self._report(runs, settings, problems, roster, early, requested=requested)
+        # Runs this process does not know (a restart, a crash, another session): the ledger kept them. Not for
+        # cancel: a ledger run cannot be cancelled from here, so it stays in unknown_run_ids.
+        lookup = bool(unknown) and not args.get("cancel")
+        ledger = self.ledger.load() if lookup else {}
+        if lookup and ledger:
+            found = [run_id for run_id in unknown if run_id in ledger and run_id not in foreign]
+            if found:
+                limit = max(2_000, min(settings["summary_max_chars"], TOTAL_SUMMARY_BUDGET // len(found)))
+                out["results"].extend(ledger_view(ledger[run_id], limit) for run_id in found)
+                unknown = [run_id for run_id in unknown if run_id not in found]
+        if recent:
+            out["recent"] = [ledger_line(item) for item in self.ledger.recent(recent)]
+            out["next"] = ("Runs from this profile's run ledger, newest first, also from earlier or crashed sessions. "
+                           "Pass run_ids for a run's report; a lost run's edits are still in its workdir/branch.")
         if unknown:
             out["unknown_run_ids"] = unknown
-        if not runs and not unknown:
+        if not runs and not unknown and not recent and not ids:
             out["note"] = "No unreported agent runs in this conversation."
         with self._lock:
             live_plans = [p.plan_id for p in self._plans.values()
@@ -664,8 +754,16 @@ class AgentsService:
         run = Run(run_id="ag_" + uuid.uuid4().hex[:10], agent=spec.name, owner_session_id=session_id,
                   goal=task["goal"], readonly=spec.readonly, write_scope=task.get("write_scope", ()),
                   owner_ref=_weak(parent), model=spec.model, started_at=self.wall(),
-                  workdir=task.get("resolved_workdir"), head_sha=task.get("head"))
+                  workdir=task.get("resolved_workdir") or task.get("workdir"), head_sha=task.get("head"),
+                  branch=task.get("branch"), plan_id=task.get("plan_id"))
         self._track(run)
+        try:
+            return self._launch_run(run, spec, task, parent, parent_provider, settings, features)
+        finally:
+            self.ledger.record(run)  # running, or failed at launch: either way the ledger knows it
+
+    def _launch_run(self, run: Run, spec: AgentSpec, task: dict, parent: Any, parent_provider: str,
+                    settings: dict, features: dict) -> Run:
         if spec.unreachable:
             return self._fail(run, "endpoint_unavailable",
                               f"No route for agent '{spec.name}' is reachable: "
@@ -874,9 +972,16 @@ class AgentsService:
         return None
 
     def _poll(self, run: Run) -> bool:
-        """Refresh one run; True once it is finished."""
+        """Refresh one run; True once it is finished. The poll that sees it finish writes it to the ledger."""
         if run.status != "running":
             return True
+        done = self._poll_state(run)
+        if done:
+            run.finished_at = self.wall()
+            self.ledger.record(run)
+        return done
+
+    def _poll_state(self, run: Run) -> bool:
         if run.handle is None:
             return self._finish_unknown(run)
         lifecycle = self.host.lifecycle
@@ -978,8 +1083,27 @@ class AgentsService:
             item["fallback"] = run.fallback
         return item
 
+    def _wait_cap_note(self, requested: Any, settings: dict) -> str | None:
+        """When Hermes' tool deadline cut short a wait the lead asked for explicitly. Never for the settings
+        default: the lead did not ask, and the note would cost tokens on every call."""
+        if requested is None or isinstance(requested, bool):
+            return None
+        try:
+            asked = float(requested)
+        except (TypeError, ValueError):
+            return None
+        if asked != asked:  # NaN
+            return None
+        asked = min(asked, float(INT_RANGES["wait_seconds"][1]))
+        cap = self._wait_budget(asked, settings)
+        if asked - cap < 1.0:
+            return None
+        return (f"Waited {int(cap)} s, not {int(asked)}: Hermes ends a tool call at its tool deadline "
+                f"(timeouts.tools.sequential_call). Asking for more does not wait longer; the operator can raise "
+                "that deadline.")
+
     def _report(self, runs: list, settings: dict, problems: list | None = None,
-                roster: Roster | None = None, early: str | None = None) -> dict:
+                roster: Roster | None = None, early: str | None = None, requested: Any = _UNSET) -> dict:
         results, pending = [], []
         finished = sum(1 for run in runs if run.status != "running") or 1
         # Keep the whole tool result well under Hermes' 100k-character spill threshold.
@@ -1000,6 +1124,10 @@ class AgentsService:
                                "Read the message, then collect them with agents_status.")
             elif early == "interrupted":
                 out["next"] = "Stopped waiting after an interrupt; agents that were not stopped keep working."
+            elif requested is not _UNSET:
+                note = self._wait_cap_note(requested, settings)
+                if note:
+                    out["wait_note"] = note
         notes = list(problems or [])
         if roster is not None and roster.problems:
             notes.append(f"{len(roster.problems)} agent file problem(s); /crew lists them.")
@@ -1187,6 +1315,11 @@ class AgentsService:
             return
         plan.note = None if plan.note and plan.note.startswith("delegation paused") else plan.note
         parent_provider = str(getattr(parent, "provider", "") or "")
+        branches: dict = {}  # git runs here, outside the admit lock: folder and branch for the ledger
+        for _spec, task, _ids in plan.queue:
+            task["plan_id"] = plan.plan_id  # so the launch snapshot in the ledger already carries it
+            if "branch" not in task:
+                self._note_branch(task, branches)
         with self._admit:
             mine = self._live_runs(plan.owner_session_id, parent)
             live_writers = [r for r in mine if not r.readonly]
@@ -1577,6 +1710,44 @@ class AgentsService:
         return render_prompt(roster, deferred=self.host.tool_deferred("agents_run"))
 
 
+def _ago(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)):
+        return "?"
+    seconds = max(0, int(time.time() - seconds))
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    if seconds < 172_800:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86_400} d ago"
+
+
+def ledger_line(item: dict) -> dict:
+    """One compact ledger row for agents_status recent: enough to find the work, no report."""
+    row = {k: item[k] for k in ("run_id", "agent", "status", "workdir", "branch") if item.get(k)}
+    row["goal"] = clip(item.get("goal") or "", 100)
+    row["started"] = _ago(item.get("started_at"))
+    if item.get("owner_session_id"):
+        row["session"] = item["owner_session_id"]
+    if item.get("summary"):
+        row["has_report"] = True
+    return row
+
+
+def ledger_view(item: dict, summary_limit: int) -> dict:
+    """A ledger run in agents_status results: the run as it was last recorded, with its report."""
+    view = {k: item[k] for k in ("run_id", "agent", "status", "model", "provider", "workdir", "branch",
+                                 "write_scope", "api_calls", "duration_seconds") if item.get(k)}
+    view["goal"] = clip(item.get("goal") or "", 100)
+    if item.get("readonly"):
+        view["readonly"] = True
+    if item.get("summary"):
+        view["summary"] = clip(item["summary"], summary_limit)
+    if item.get("error"):
+        view["error"] = clip(item["error"], 2_000)
+    view["source"] = "ledger"
+    return view
+
+
 def _lookup_key(tool_name: str, args: Any) -> str:
     """What one scouting call looked at, so repeated reads of the same target count once per turn."""
     if not isinstance(args, dict):
@@ -1726,22 +1897,6 @@ def _report_count(result: Any) -> int:
 WEB_LOOKUPS = frozenset({"web_search", "web_extract"})
 
 
-def _lookup_label(tool_name: str, args: dict) -> str:
-    """One short line naming what a lookup looked at, for the nudge."""
-    if tool_name == "read_file":
-        text = f"read {args.get('path')}"
-    elif tool_name == "search_files":
-        text = f"search {args.get('pattern')!r} in {args.get('path') or '.'}"
-    elif tool_name == "web_search":
-        text = f"web search {args.get('query')!r}"
-    elif tool_name == "web_extract":
-        urls = args.get("urls")
-        text = "fetch " + (", ".join(map(str, urls[:2])) if isinstance(urls, list) else str(urls))
-    else:
-        text = " ".join(str(args.get("command") or "").split())
-    return _shorten(text, 110)
-
-
 def _lookup_paths(tool_name: str, args: dict) -> list:
     """Absolute local paths a lookup touched (a terminal command counts its leading cd)."""
     if tool_name in ("read_file", "search_files"):
@@ -1772,14 +1927,18 @@ def nudge_workdir(lookups: list) -> str | None:
     return common
 
 
-def nudge_text(count: int, scouts: list, lookups: list | None = None, deferred: bool = False) -> str:
-    """The scouting hint: what the lead just looked at, and a call it can send as it is."""
+def nudge_text(count: int, scouts: list, lookups: list | None = None, deferred: bool = False,
+               chars: int = 0) -> str:
+    """The scouting hint: how much the lead read by hand, and a call it can send as it is.
+
+    It stays in the lead's context for the rest of the session, so it is kept short (about 450 characters):
+    no list of the lookups (the lead just made them), only the numbers, the scout and a ready call.
+    """
     lookups = lookups or []
     web = sum(1 for name, _ in lookups if name in WEB_LOOKUPS)
     preferred = "researcher" if lookups and web * 2 > len(lookups) else "explorer"
     agent = preferred if preferred in scouts else scouts[0]
-    task: dict = {"agent": agent, "goal": "<the open question(s), and what to report back>",
-                  "context": "<what you already know and ruled out>"}
+    task: dict = {"agent": agent, "goal": "<open questions + what to report>", "context": "<what you know>"}
     workdir = nudge_workdir(lookups)
     if workdir:
         task["workdir"] = workdir
@@ -1789,15 +1948,12 @@ def nudge_text(count: int, scouts: list, lookups: list | None = None, deferred: 
         call = "tool_call " + json.dumps(wrapped, ensure_ascii=False)
     else:
         call = "agents_run " + json.dumps(arguments, ensure_ascii=False)
-    shown = [f"  - {_lookup_label(name, args)}" for name, args in lookups[-NUDGE_SHOWN_LOOKUPS:]]
+    read = f" (~{chars // 1000}k characters)" if chars >= 1000 else ""
     return "\n".join([
-        f"[hermes-agent-crew] {count} separate reads/searches by hand in this turn"
-        + (", latest:" if shown else "."), *shown,
-        "Still more to look up? Hand it to read-only agents ("
-        + ", ".join(scouts[:4]) + ") in ONE call, one task per question or area (several tasks run in parallel), "
-        "and keep your context for decisions:",
-        "  " + call,
-        "Keep going yourself if you are nearly done."])
+        f"[hermes-agent-crew] {count} separate reads/searches by hand this turn{read}. More to look up? "
+        f"Send it to read-only agents ({', '.join(scouts[:4])}) in ONE call, one task per "
+        "question; nearly done: carry on.",
+        call])
 
 
 def model_label(spec: AgentSpec) -> str:

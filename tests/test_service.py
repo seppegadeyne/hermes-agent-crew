@@ -528,6 +528,7 @@ def lead_result(rig, tool, args=None, turn="t1", session="lead-1", result='{"con
 
 
 def test_nudge_fires_once_after_a_run_of_manual_scouting(rig):
+    rig.host.settings = {"nudge_min_chars": 0}  # counting only; the text gate has its own tests
     for _ in range(7):
         assert lead_result(rig, "read_file") is None
     assert lead_result(rig, "write_file") is None  # edits do not count
@@ -541,6 +542,7 @@ def test_nudge_fires_once_after_a_run_of_manual_scouting(rig):
 
 
 def test_nudge_counts_distinct_lookups_not_pages_of_one_file(rig):
+    rig.host.settings = {"nudge_min_chars": 0}  # counting only; the text gate has its own tests
     # Paging through the file the lead is about to edit is one lookup, not scout work.
     for offset in range(1, 20):
         assert lead_result(rig, "read_file", {"path": "/repo/big.py", "offset": offset * 200}) is None
@@ -587,6 +589,7 @@ def test_schema_allows_what_the_settings_allow(plugin):
 
 
 def test_nudge_leaves_script_and_error_results_alone(rig):
+    rig.host.settings = {"nudge_min_chars": 0}  # counting only; the text gate has its own tests
     # execute_code scripts call tools without a session or turn id and parse every result as JSON.
     for _ in range(12):
         assert rig.service.on_transform_tool_result(tool_name="read_file", args={}, result='{"content": "x"}',
@@ -630,6 +633,7 @@ def test_error_results_get_no_hint():
 
 
 def test_nudge_skips_success_false_results(rig):
+    rig.host.settings = {"nudge_min_chars": 0}  # counting only; the text gate has its own tests
     for _ in range(7):
         lead_result(rig, "read_file")
     assert lead_result(rig, "web_extract", result='{"success": false, "message": "403"}') is None
@@ -772,3 +776,24 @@ def test_roster_text_shows_routes_and_their_state(rig):
     text = rig.service.roster_text()
     assert "strata @ strata-qwen  (down)" in text and f"└ then haiku @ {DIRECT}" in text
     assert "Route 1      strata @ strata-qwen  (down)" in rig.service.roster_text("explorer")
+
+
+def test_nudge_waits_for_heavy_reading_not_just_many_reads(rig):
+    """Option C: 8 distinct lookups AND at least nudge_min_chars (default 40,000) of results in the turn."""
+    small = '{"content": "' + "x" * 100 + '"}'
+    for _ in range(12):
+        assert lead_result(rig, "read_file", result=small) is None  # many reads, little text: no hint
+    big = '{"content": "' + "x" * 6_000 + '"}'
+    out = [lead_result(rig, "read_file", result=big, turn="t2") for _ in range(10)]
+    assert out[:7] == [None] * 7  # ~42k after 7, but only 7 lookups
+    assert out[7] is not None and "~48k characters" in out[7]  # 8 lookups and over 40k
+    assert out[8] is None  # still once per turn
+
+
+def test_nudge_text_is_short(rig):
+    from hermes_agent_crew.agents_service import nudge_text
+    lookups = [("read_file", {"path": f"/srv/app/src/m{n}.py"}) for n in range(8)]
+    text = nudge_text(8, ["explorer", "researcher", "reviewer", "verifier"], lookups, True, 52_000)
+    assert len(text) <= 500, len(text)
+    assert "/srv/app/src/m3.py" not in text  # no list of the lookups the lead just made
+    assert '"workdir": "/srv/app/src"' in text and '"agent": "explorer"' in text

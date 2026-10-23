@@ -131,21 +131,66 @@ is a deprecated alias for one release.
   of `HEAD` (rebase, amend, other branch), the agent reviews in full and still gets the earlier
   report. Opt-in per task; not for plan stages, and not together with `diff_base`.
 - The wait is capped 25 seconds below Hermes' tool deadline (`timeouts.tools.sequential_call`,
-  default 420 seconds). Agents that are still working come back as `run_ids`.
+  default 420 seconds). Agents that are still working come back as `run_ids`. When the lead asked
+  for a longer wait than the deadline allows, the result carries a `wait_note` that says so.
 
 `agents_status` collects, waits for or cancels those runs. Without `run_ids` it returns every run
 whose result the lead has not seen yet.
+
+### Waiting for long runs
+
+A builder or a full review often takes 8-20 minutes. With the default 420-second tool deadline
+every wait ends after 395 seconds, and each extra `agents_status` call resends the lead's whole
+context. If agents regularly outlive that, raise the deadline for sequential tool calls and the
+plugin's default wait with it:
+
+```yaml
+timeouts:
+  tools:
+    sequential_call: 1260   # seconds; applies to every sequential tool call, not only agents_run
+plugins:
+  entries:
+    hermes-agent-crew:
+      settings:
+        wait_seconds: 1200
+```
+
+The longer deadline also lets a hung tool run longer before Hermes gives up on it. Concurrent
+batches keep their own deadline (`timeouts.tools.concurrent_batch`); `agents_run` normally runs on
+its own, so the sequential one applies. Keep a gateway's `agent.gateway_timeout` above it: the
+tool's activity heartbeat keeps the turn alive meanwhile, but a shorter turn limit still wins.
+A new user message still ends the wait at once.
+
+### Run ledger
+
+Runs live in memory. To survive a crash, a restart or a new session, every run is also written to
+a ledger, `runs.jsonl` in the profile's plugin data folder (`<HERMES_HOME>/plugin-data/...`):
+one line when it starts and one when it ends, with agent, goal, folder, branch, write scope,
+status, and the report clipped to 4,000 characters. The newest 200 runs are kept.
+
+- `agents_status` with `recent: 5` lists the latest runs of the profile, newest first, also from
+  sessions that crashed. A run that was still running when its Hermes process went away shows
+  as `lost`: its outcome is unknown, but its folder and branch say where its edits are.
+- `agents_status` with `run_ids` of such a run returns its last recorded state and report.
+- `follow_up` also accepts a run from the ledger, so a re-review works after a restart.
+
+The ledger is shared by every session of the profile, like `session_search`. On a gateway
+profile that serves several people, set `run_ledger: false` if they must not see each other's
+agent goals and reports.
 
 With tool search enabled, Hermes defers plugin tools behind `tool_search`. The prompt section then
 gives the exact `tool_call` shape for `agents_run`, so the lead calls it without a search or
 describe round trip; without tool search it shows the direct call.
 
 Scouting nudge: when the lead makes `nudge_after` (default 8) separate reads or searches in one
-turn without using agents, the plugin appends a hint to that tool result. It names the latest
-lookups and a ready call (an explorer for files and commands, a researcher for web lookups, with the
-folder the lookups share as `workdir`) in the shape this session can send. Repeated calls on the same
-target (paging one file, the same search or command) count once. It fires once per turn, never for
-subagents, and never after the turn used agents.
+turn without using agents, and those returned at least `nudge_min_chars` (default 40,000)
+characters together, the plugin appends a short hint (about 450 characters) to that tool result:
+how much was read, and a ready call (an explorer for files and commands, a researcher for web
+lookups, with the folder the lookups share as `workdir`) in the shape this session can send.
+Repeated calls on the same target (paging one file, the same search or command) count once. It
+fires once per turn, never for subagents, and never after the turn used agents. Many small reads
+do not trigger it: the hint itself stays in the context for the rest of the session, so it only
+appears where the reading was heavy enough to be worth handing over.
 
 Read-only agents have no shell. Goals that need commands (probes, scripts, tests) go to a writer
 with a `write_scope` or stay with the lead; the prompt section says so.
@@ -269,7 +314,8 @@ plugins:
 | `max_parallel` | `12` | Tasks per `agents_run` call (1-16). |
 | `max_live_runs` | `24` | Runs in progress per conversation (1-32). |
 | `max_parallel_writers` | `1` | Agents that can change files running at once while one of them has no `write_scope` (0-8). Writers that all have disjoint scopes run side by side; `0` turns writers off. |
-| `wait_seconds` | `600` | Default wait, always capped below the tool deadline. |
+| `wait_seconds` | `600` | Default wait, always capped below the tool deadline (see Waiting for long runs). |
+| `run_ledger` | `true` | Keep the run ledger (see Run ledger). `false` writes and reads nothing. |
 | `diff_max_chars` | `20000` | Largest diff attached with `attach_diff`. |
 | `summary_max_chars` | `12000` | Longest report returned per run. |
 | `plan_max_items` | `24` | Most items one plan stage may fan out over (1-64). |
@@ -277,6 +323,7 @@ plugins:
 | `readonly_mcp` | `true` | Read-only agents without a `tools:` list may call the profile's read-only MCP tools (see How read-only is enforced). |
 | `readonly_mcp_tools` | `[]` | Extra MCP tool names or globs (`mcp__server__get_*`) that count as read-only, for servers that do not set `readOnlyHint`. Only add tools that cannot change anything. |
 | `nudge_after` | `8` | After this many distinct reads or searches by the lead in one turn without agents, append a one-time hint to use read-only agents. `0` turns it off. |
+| `nudge_min_chars` | `40000` | The hint also waits until those lookups returned this many characters together. `0` counts lookups only. |
 
 ### Model tiers
 

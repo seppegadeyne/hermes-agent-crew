@@ -30,7 +30,7 @@ def loaded(hermes_home, monkeypatch):
     hermes_plugins._reset_plugin_managers_for_tests()
     manager = hermes_plugins.get_plugin_manager()
     manager.discover_and_load()
-    yield SimpleNamespace(manager=manager, plugins=hermes_plugins)
+    yield SimpleNamespace(manager=manager, plugins=hermes_plugins, home=hermes_home)
     hermes_plugins._reset_plugin_managers_for_tests()
 
 
@@ -109,6 +109,12 @@ def test_real_lifecycle_launch_guard_and_result(loaded, monkeypatch):
     assert _dispatch_pre_tool_call_hooks("read_file", {"path": "x"}, task_id=CHILD_ID)[0] is None
     # ... and never touches tool calls of the lead or of other agents.
     assert _dispatch_pre_tool_call_hooks("write_file", {"path": "x"}, task_id="lead-task")[0] is None
+    # The run ledger lands in this profile's plugin data folder (ctx.state.data_dir), not elsewhere.
+    ledgers = list((loaded.home / "plugin-data").glob("*/runs.jsonl"))
+    assert len(ledgers) == 1, ledgers
+    lines = [json.loads(line) for line in ledgers[0].read_text().splitlines()]
+    assert [line["status"] for line in lines] == ["running", "succeeded"]
+    assert lines[-1]["run_id"] == result["run_id"] and "app/routes.py:12" in lines[-1]["summary"]
 
 
 def test_outside_an_agent_turn_the_tool_refuses(loaded):
@@ -126,9 +132,9 @@ def test_scouting_nudge_through_the_real_result_hook(loaded):
                              _delegate_depth=0)
     ids = _CallIds(task_id="lead", session_id="lead", tool_call_id="c", turn_id="turn-1", api_request_id="")
     with bind_subagent_parent(parent):
-        out = [_apply_transform_tool_result_hook("read_file", {"path": f"x{n}"}, '{"content": "x"}', 1, ids)
-               for n in range(8)]
-    assert out[:7] == ['{"content": "x"}'] * 7
+        body = '{"content": "' + "x" * 6_000 + '"}'  # 8 reads of ~6k: past the 40k text gate
+        out = [_apply_transform_tool_result_hook("read_file", {"path": f"x{n}"}, body, 1, ids) for n in range(8)]
+    assert out[:7] == [body] * 7
     assert "[hermes-agent-crew] 8 separate reads/searches" in out[7] and "explorer" in out[7]
 
 

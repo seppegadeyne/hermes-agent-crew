@@ -53,6 +53,13 @@ class HermesHost:
         from hermes_constants import get_hermes_home
         return Path(get_hermes_home())
 
+    def data_dir(self) -> Path:
+        """This plugin's profile-scoped data folder (``ctx.state.data_dir``), else one under plugin-data."""
+        try:
+            return Path(self.ctx.state.data_dir)
+        except Exception:
+            return self.home() / "plugin-data" / "hermes-agent-crew"
+
     @staticmethod
     def cwd() -> Path:
         try:

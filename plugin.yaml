@@ -1,5 +1,5 @@
 name: hermes-agent-crew
-version: 0.10.0
+version: 0.12.0
 description: "Named subagents for Hermes on any provider, local models included: strong models review, balanced models build, fast models swarm. The lead is the session's own model. Agents are Markdown files (the Claude Code agent format) with a fixed tier or model and tool set; read-only agents are enforced by a pre_tool_call guard. Uses the public subagent lifecycle API; no core patch."
 author: Seppe Gadeyne
 kind: standalone
@@ -54,7 +54,12 @@ config_schema:
     type: int
     default: 600
     label: Wait for results (seconds)
-    description: How long agents_run waits before it returns run_ids (0-1800). Always capped 25 seconds below Hermes' tool deadline (timeouts.tools.sequential_call, default 420).
+    description: How long agents_run waits before it returns run_ids (0-1800). Always capped 25 seconds below Hermes' tool deadline (timeouts.tools.sequential_call, default 420); raise that deadline too for longer waits.
+  run_ledger:
+    type: bool
+    default: true
+    label: Run ledger
+    description: Record every agent run (goal, folder, branch, status, report) in the profile's plugin data, so agents_status can find runs of earlier or crashed sessions. Shared by all sessions of the profile.
   diff_max_chars:
     type: int
     default: 20000
@@ -70,6 +75,11 @@ config_schema:
     default: 8
     label: Scouting nudge
     description: After this many read or search calls by the lead in one turn without agents, add a one-time hint to use read-only agents (0 turns it off, max 50).
+  nudge_min_chars:
+    type: int
+    default: 40000
+    label: Scouting nudge text threshold
+    description: The nudge also waits until the lead's own reads and searches in the turn returned at least this many characters (0-1000000; 0 counts lookups only).
   plan_max_items:
     type: int
     default: 24

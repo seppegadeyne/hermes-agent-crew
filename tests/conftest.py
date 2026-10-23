@@ -164,6 +164,9 @@ class FakeHost:
     def home(self):
         return self.home_path
 
+    def data_dir(self):
+        return self.home_path / "plugin-data" / "crew"
+
     def cwd(self):
         return self.repo
 

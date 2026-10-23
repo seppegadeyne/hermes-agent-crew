@@ -64,6 +64,15 @@ def head(cwd: Path) -> str | None:
     return out if code == 0 and SHA_RE.match(out) else None
 
 
+BRANCH_RE = re.compile(r"^[A-Za-z0-9._/@+-]{1,200}$")
+
+
+def branch(cwd: Path) -> str | None:
+    """Short name of the checked-out branch at ``cwd``, or None (detached HEAD, no repository, git missing)."""
+    code, out = _plain(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd)
+    return out if code == 0 and BRANCH_RE.match(out) else None
+
+
 def is_ancestor(cwd: Path, sha: str) -> bool:
     """True when ``sha`` is HEAD or an ancestor of it (False after a rebase, amend or branch switch)."""
     if not isinstance(sha, str) or not SHA_RE.match(sha):

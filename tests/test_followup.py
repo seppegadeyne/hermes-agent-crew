@@ -109,13 +109,13 @@ def test_plan_stages_do_not_accept_follow_up(plugin):
 # ------------------------------------------------------------------ concrete nudge
 
 
-def test_nudge_names_the_latest_lookups_and_a_ready_call(rig, tmp_path):
+def test_nudge_gives_the_count_and_a_ready_call(rig, tmp_path):
+    rig.host.settings = {"nudge_min_chars": 0}
     for n in range(7):
         lead_result(rig, "read_file", {"path": f"/srv/app/src/m{n}.py"})
     hinted = lead_result(rig, "terminal", {"command": "cd /srv/app && grep -rn token src"})
     hint = hinted.split("\n\n", 1)[1]
-    assert "read /srv/app/src/m6.py" in hint and "cd /srv/app && grep -rn token src" in hint
-    assert "m2.py" not in hint  # only the latest few
+    assert "8 separate reads/searches" in hint and "m6.py" not in hint  # numbers, not a list of lookups
     line = next(x for x in hint.splitlines() if x.strip().startswith("tool_call "))
     call = json.loads(line.strip()[len("tool_call "):])
     task = call["calls"][0]["arguments"]["tasks"][0]
@@ -124,6 +124,7 @@ def test_nudge_names_the_latest_lookups_and_a_ready_call(rig, tmp_path):
 
 
 def test_nudge_picks_the_researcher_for_web_lookups_and_the_direct_shape(rig):
+    rig.host.settings = {"nudge_min_chars": 0}
     rig.host.deferred = False
     for n in range(8):
         hinted = lead_result(rig, "web_search", {"query": f"api limits {n}"})
@@ -202,11 +203,12 @@ def test_nudge_workdir_keeps_dotted_folders():
 
 
 def test_failed_lookups_do_not_pick_the_workdir(rig):
+    rig.host.settings = {"nudge_min_chars": 0}
     for n in range(7):
         lead_result(rig, "read_file", {"path": f"/srv/app/m{n}.py"})
     hinted = lead_result(rig, "read_file", {"path": "/nope/gone.py"}, result='{"error": "no such file"}')
     assert hinted is None  # an error result never carries the hint
     hinted = lead_result(rig, "read_file", {"path": "/srv/app/m9.py"})
     assert '"workdir": "/srv/app"' in hinted
-    assert "/nope" not in hinted and "read None" not in hinted
+    assert "/nope" not in hinted
     assert "9 separate reads/searches" in hinted  # the failed lookup still counted

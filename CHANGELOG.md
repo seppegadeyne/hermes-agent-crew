@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.12.0 (2026-10-23)
+
+Measured over 7 days of lead sessions (611 turns, 38 nudges shown): no nudge was followed by an
+explorer or researcher run, 24 of 38 came after the lead had already edited, and after the median
+nudge the lead read only 2 more targets (about 2,300 characters). Each nudge was about 1,000
+characters that stayed in the lead's context for the rest of the session. A replay of the same
+turns with other thresholds (cost = hint characters x later API calls, benefit = reading a scout
+could have taken over x later calls) put the current rule at an 11.4% break-even follow rate.
+
+- The nudge also needs `nudge_min_chars` (default 40,000) of lookup results in the turn, next to
+  `nudge_after` distinct lookups. In the replay it fires 25 times instead of 42 and still catches
+  all 8 turns where at least 20,000 more characters were read before the next edit.
+- The hint is shorter, about 450 characters instead of about 1,000. It drops the list of the latest
+  lookups, which the lead had just made, and keeps the count, the characters read and a ready call.
+- Expected effect: about 83% fewer characters spent on nudges in the lead's context. The rule pays
+  off when the lead follows about 1 in 40 nudges (was 1 in 9). Not yet measured in a live
+  session. If the follow rate stays at zero, the next step is `nudge_after: 0` by default.
+
+## 0.11.0 (2026-10-23)
+
+Measured over 48 hours of sessions (64 lead sessions, 65 agent runs): 17 of 35 agents_run calls and
+6 of 25 agents_status calls came back with nothing but "still running". The lead asked for waits
+of 600-1800 seconds, but every wait ended at 395 seconds because of Hermes' 420-second tool deadline.
+Builders and full reviews ran 8-22 minutes (20 of 35 opus runs and 13 of 34 sonnet runs outlived
+395 s). Each extra round trip resent the lead's context, 280k-430k tokens in those sessions. One lead
+session crashed while two builders were running. The runs were gone with it, and a new session
+(13.6 USD) had to find their worktrees by hand.
+
+- Run ledger: every run is written to `runs.jsonl` in the profile's plugin data folder, once when it
+  starts and once when it ends. A record holds agent, goal, folder, branch, write scope, status
+  and the report clipped to 4,000 characters; the newest 200 runs are kept.
+  - `agents_status` with `recent: N` lists the latest runs of the profile, also from sessions that
+    crashed. A run whose Hermes process went away shows as `lost`, with the folder and branch
+    where its edits are.
+  - `run_ids` and `follow_up` fall back to the ledger for runs this process does not know.
+  - Best-effort: every error is swallowed and locks never block. A dead process is detected by a
+    per-process token and its start time, so a reused pid does not keep a run alive.
+  - Costs one `git symbolic-ref` per folder per call and two short appends per run. Off with
+    `run_ledger: false`. The ledger is shared by all sessions of a profile.
+  - Expected effect: recovering after a crash takes one agents_status call instead of a search
+    by hand. Nothing is added to the lead's context unless it asks.
+- Wait cap: when the lead explicitly asks for a longer wait than the tool deadline allows, the
+  result now says so in `wait_note`. A plain default wait gets no note. The README documents
+  raising `timeouts.tools.sequential_call` together with `wait_seconds`. Expected effect: on a
+  profile with a 1,260-second deadline, most builders and reviews return in the first wait,
+  which avoids the extra round trips counted above. Not yet measured in a live session.
+
 ## 0.10.0 (2026-10-21)
 
 Measured over 72 hours of sessions (5 Hermes profiles): agents ran in 4 of 88 lead sessions, 9 of
